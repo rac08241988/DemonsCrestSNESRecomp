@@ -48,6 +48,10 @@ add_executable(DemonsCrestSNESRecomp
     src/dc_display.c
     src/dc_widescreen.c
     src/mods/dc_widescreen_plugin.c
+    # In-game Options menu (F12): RetroArch shader presets + 120 Hz motion.
+    src/dc_options.c
+    src/dc_interp.c
+    src/dc_default_config.c
 )
 
 # ROM identity. rom_identity.txt is the one place the digests live: the build
@@ -100,6 +104,13 @@ endif()
 # it is now also enforced: a project with packages that never calls this fails
 # to configure.
 snesrecomp_target_mod_catalog(DemonsCrestSNESRecomp ${CMAKE_SOURCE_DIR}/mods/preloaded)
+# RetroArch GLSL presets for the in-game Options menu (shaders-120hz fork).
+# Not tracked: scripts/fetch_shaders.sh stages libretro/glsl-shaders into
+# <repo>/shaders, and a setup pack ships that folder at its root, so the
+# player's rebuild puts it beside the playable exe too.
+if(EXISTS ${CMAKE_SOURCE_DIR}/shaders/presets)
+    snesrecomp_target_stage_dir(DemonsCrestSNESRecomp ${CMAKE_SOURCE_DIR}/shaders shaders)
+endif()
 # Any other directory the game reads exe-relative (a translations/ table, ...)
 # is staged with snesrecomp_target_stage_dir, never with a separate ALL target.
 

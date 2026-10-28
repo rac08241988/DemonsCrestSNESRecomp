@@ -58,8 +58,14 @@ ROM_CRC32="$(python3 "$IDENTITY_TOOL" rom_identity.txt --get expected_crc32)"
 # mods/ is the catalog the build stages beside the executable, and the package
 # a netplay host transfers to a guest. Add --runtime-dir <name> for any other
 # directory the game loads exe-relative (translations, ...).
+# shaders-120hz fork: ship the staged RetroArch presets (GPL, untouched) at
+# the pack root; CMakeLists.txt stages them beside the rebuilt exe.
+SHADER_ARGS=()
+if [ -d "$BUILD_DIR/shaders/presets" ]; then SHADER_ARGS=(--runtime-dir shaders); fi
+
 exec bash "$IMPL" \
   --runtime-dir mods \
+  "${SHADER_ARGS[@]+"${SHADER_ARGS[@]}"}" \
   --build-dir "$BUILD_DIR" \
   --artifact "$PLATFORM" \
   --exe-name DemonsCrestSNESRecomp \

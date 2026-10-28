@@ -35,6 +35,7 @@
 #include "game_rtl.h"
 
 #include "beam_frame_driver.h"
+#include "dc_interp.h"
 #include "common_rtl.h"
 #include "cpu_state.h"
 #include "snes/interp_bridge.h"
@@ -109,7 +110,11 @@ void GameRunOneFrame(void)
 
 void GameDrawPpuFrame(void)
 {
-    snes_beam_frame_driver_draw_ppu_frame();
+    /* The observer records each line's live register/CGRAM state for the
+     * 120 Hz motion re-raster (src/dc_interp.c); it is a no-op when the
+     * motion mode is Off. */
+    snes_beam_frame_driver_draw_ppu_frame_observed(DcInterp_ObserveLine, NULL);
+    DcInterp_EndFrame();
 }
 
 void GameSessionReset(void)

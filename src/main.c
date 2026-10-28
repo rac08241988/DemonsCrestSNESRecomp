@@ -29,6 +29,8 @@
 #include "game_rtl.h"
 #include "dc_display.h"
 #include "dc_widescreen.h"
+#include "dc_options.h"   /* F12 options menu: shader presets, 120 Hz motion */
+#include "dc_interp.h"    /* 120 Hz motion: sub-frame re-raster */
 #include "desktop/config.h"
 #include "snesrecomp_rom_identity.h"  /* generated from rom_identity.txt */
 
@@ -61,7 +63,7 @@ static void DcPrepareFrame(int drawable_w, int drawable_h, int *w, int *h) {
 }
 
 static void DcBeginFrame(unsigned number) {
-    (void)number;
+    DcOptions_OnSimFrame(number);
     DcWidescreenConfigureFrame();
 }
 
@@ -102,6 +104,18 @@ static const SnesDesktopHostGame kGameHost = {
      * a battery. Leave the SRAM path NULL so the launcher does not offer a
      * SAVES panel for storage the cartridge never had. */
     .sram_path           = NULL,
+    /* In-game Options menu (F12 or Escape / gamepad Guide): the shader preset picker
+     * and the 120 Hz motion mode, persisted in dc_options.ini. */
+    .after_config        = DcOptions_AfterConfig,
+    .default_config_ini  = kDcDefaultConfigIni,
+    .on_key              = DcOptions_OnKey,
+    .on_gamepad_button   = DcOptions_OnGamepadButton,
+    .modal_active        = DcOptions_ModalActive,
+    .draw_modal          = DcOptions_DrawModal,
+    /* 120 Hz motion: decouple presentation on 100 Hz+ displays and compose
+     * in-between frames (game logic stays at 60 Hz). */
+    .presentation_hz     = DcInterp_PresentationHz,
+    .draw_frame          = DcInterp_DrawFrame,
 };
 
 #ifndef __ANDROID__

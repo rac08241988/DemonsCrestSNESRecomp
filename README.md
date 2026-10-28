@@ -1,5 +1,24 @@
 # Demon's Crest Recompiled
 
+## Play on Windows (no coding needed)
+
+1. Download the **setup zip** from this fork's
+   [Releases](https://github.com/rac08241988/DemonsCrestSNESRecomp/releases)
+   page and unzip it anywhere.
+2. Open `DemonsCrestSNESRecomp.exe`.
+3. Click **Browse For ROM** and pick your own Demon's Crest (USA) ROM
+   (`.sfc`/`.smc`, SHA-256 `18d40a80...5844de`).
+4. Let it build. The first time it downloads a portable compiler and builds
+   the game on your PC, which takes a few minutes.
+5. Click **Play**. Next time, just open the exe.
+
+The zip has no game code and no ROM. Everything is built on your machine
+from your own cartridge dump. In game, press **F12** or **Escape** (or the
+pad **Guide** button) to open the Options menu, where you pick a CRT/RetroArch
+shader and the 120 Hz motion mode. Rewind is now **Shift+F12**.
+
+---
+
 Native PC recompilation of **Demon's Crest** (USA), built on
 [snesrecomp](https://github.com/magnopaz/snesrecomp). The 65816 game
 code is translated to C and runs on the framework's authoritative interpreter,
@@ -39,6 +58,51 @@ using your own legally dumped ROM.
 > **You must legally own a copy of the game.** No ROM data is distributed with
 > this project, in the repository or in any release. The recompiled C is
 > generated locally from your own copy and is never committed.
+
+
+## This fork: options menu, RetroArch shaders, 120 Hz (branch `shaders-120hz`)
+
+Additions on top of upstream (no game code, ROM, or generated C is committed):
+
+- **In-game Options menu** - press **F12** or **Escape** (no modifiers) or the
+  gamepad **Guide** button. Arrows / D-pad move, Left/Right change, Enter or
+  pad A accepts, Backspace or pad B goes back, Escape / F12 / Guide close it.
+  The game pauses while it is open.
+- **Shader** - every root-level RetroArch `.glslp` preset from
+  libretro/glsl-shaders (commit cba01a48), applied live. Needs
+  `OutputMethod = OpenGL` (now the default). Chosen only from this menu;
+  `config.ini`'s `Shader` key is ignored.
+- **120Hz motion** - Off / Interpolate / Low-latency. Game logic stays at
+  60 Hz; on a 100 Hz+ display each in-between frame is re-rendered with
+  interpolated scroll and sprite positions (widescreen aware). Interpolate is
+  smoothest (blends the previous and newest frame, about half a frame of
+  added latency); Low-latency extrapolates ahead of the newest frame instead
+  (no added latency, may overshoot briefly when motion stops).
+- Both settings persist in `dc_options.ini` beside the executable.
+- **Rebinds:** Rewind moved from F12 to **Shift+F12** (pad Select+R3 is
+  unchanged). Escape had no binding in single-player play (the framework uses
+  it only to leave a netplay session, which this target does not build, and to
+  close its own save-state/rewind overlays, which still works).
+
+### Setup and build
+
+```sh
+git clone -b shaders-120hz https://github.com/rac08241988/DemonsCrestSNESRecomp
+cd DemonsCrestSNESRecomp
+scripts/setup.sh --rom "/path/to/Demon's Crest (USA).sfc"   # submodules, framework patch, shaders, regen
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
+bash scripts/fetch_shaders.sh build          # stage shaders/ beside the exe
+# Windows exe from Linux:
+cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake -DCMAKE_BUILD_TYPE=Release
+```
+
+`setup.sh` checks your ROM against `rom_identity.txt` (sha256
+`18d40a80...5844de`, a 512-byte copier header is stripped) before generating
+code. Fork note: upstream's `snesrecomp` gitlink `a085bfc` is not published
+on magnopaz/snesrecomp, so this branch pins `88d24ef`
+(`demons-crest/host-hooks`). Test hooks: `DC_SHADER_PRESET=<label>`,
+`DC_MOTION=off|interpolate|lowlatency`, `DC_INTERP_HZ=<hz>`. Licensing of the
+additions: see [`NOTICE.md`](NOTICE.md).
 
 ## Status
 

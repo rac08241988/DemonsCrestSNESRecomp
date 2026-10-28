@@ -1,0 +1,382 @@
+diff --git a/runner/src/desktop/glsl_shader.c b/runner/src/desktop/glsl_shader.c
+index 54f2464..8a5df82 100644
+--- a/runner/src/desktop/glsl_shader.c
++++ b/runner/src/desktop/glsl_shader.c
+@@ -179,13 +179,19 @@ static bool GlslShader_ReadPresetFile(GlslShader *gs, const char *filename) {
+     else if ((pass = ParseConfigKeyPass(gs, line, "srgb_framebuffer")) != NULL)
+       pass->srgb_framebuffer = ParseBool(value, NULL);
+     else if ((pass = ParseConfigKeyPass(gs, line, "alias")) != NULL)
+-      ;
++      StrSet(&pass->alias, value);
+     else if (strcmp(line, "textures") == 0 && gs->first_texture == NULL)
+       ParseTextures(gs, value);
+     else if (strcmp(line, "parameters") == 0)
+       ParseParameters(gs, value);
+-    else if (!ParseTextureKeyValue(gs, line, value) && !ParseParameterKeyValue(gs, line, value))
+-      fprintf(stderr, "%s:%d: Unknown key '%s'\n", filename, lineno, line);
++    else if (!ParseTextureKeyValue(gs, line, value) && !ParseParameterKeyValue(gs, line, value)) {
++      /* RetroArch presets override #pragma parameter defaults with bare
++       * `NAME = value` lines and need not list them under `parameters`.
++       * Record the override; the pragma keeps it (has_value). */
++      GlslParam *pa = GlslShader_GetParam(gs, line);
++      pa->value = (float)atof(value);
++      pa->has_value = true;
++    }
+   }
+   free(data_org);
+   return gs->n_pass != 0;
+@@ -222,30 +228,56 @@ void GlslShader_ReadShaderFile(GlslShader *gs, const char *filename, ByteArray *
+   free(data_org);
+ }
+ 
+-static bool GlslPass_Compile(GlslPass *p, uint type, const uint8 *data, size_t size) {
++static bool GlslPass_Compile(GlslPass *p, uint type, const uint8 *data_in, size_t size) {
+   static const char kVertexPrefix[] =   "#define VERTEX\n#define PARAMETER_UNIFORM\n";
+   static const char kFragmentPrefix[] = "#define FRAGMENT\n#define PARAMETER_UNIFORM\n";
++  /* Some libretro shaders write gl_FragColor in one branch while declaring
++     `out vec4 FragColor` for GLSL >= 130; core-profile compilers reject the mix. */
++  static const char kFragmentCompat[] = "#define FRAGMENT\n#define PARAMETER_UNIFORM\n#if __VERSION__ >= 130\n#define gl_FragColor FragColor\n#endif\n";
+   const GLchar *strings[3];
+   GLint lengths[3];
+   char buffer[256];
++  char version_line[64];
+   GLint compile_status = 0;
+-  size_t skip = 0;
+-
+-  if (size < 8 || memcmp(data, "#version", 8) != 0) {
+-    strings[0] = "#version 330\n";
+-    lengths[0] = sizeof("#version 330\n") - 1;
++  uint8 *data = (uint8 *)malloc(size + 1);
++  if (!data) return false;
++  memcpy(data, data_in, size);
++  data[size] = 0;
++
++  /* #version must be first; many presets put a license comment above it.
++     Hoist the first line-leading #version and blank it in place. */
++  snprintf(version_line, sizeof(version_line), "#version 330\n");
++  for (size_t i = 0; i + 8 <= size; i++) {
++    if ((i == 0 || data[i - 1] == '\n') && memcmp(data + i, "#version", 8) == 0) {
++      size_t e = i;
++      while (e < size && data[e] != '\n') e++;
++      size_t n = e - i;
++      if (n < sizeof(version_line) - 1) {
++        memcpy(version_line, data + i, n);
++        version_line[n] = '\n';
++        version_line[n + 1] = 0;
++        memset(data + i, ' ', n);
++      }
++      break;
++    }
++  }
++  bool uses_fragcolor_mix = type != GL_VERTEX_SHADER &&
++      strstr((char *)data, "gl_FragColor") && strstr((char *)data, "out vec4 FragColor");
++  strings[0] = version_line;
++  lengths[0] = (int)strlen(version_line);
++  if (type == GL_VERTEX_SHADER) {
++    strings[1] = kVertexPrefix; lengths[1] = sizeof(kVertexPrefix) - 1;
++  } else if (uses_fragcolor_mix) {
++    strings[1] = kFragmentCompat; lengths[1] = sizeof(kFragmentCompat) - 1;
+   } else {
+-    while (skip < size && data[skip++] != '\n') {}
+-    strings[0] = (char*)data;
+-    lengths[0] = (int)skip;
++    strings[1] = kFragmentPrefix; lengths[1] = sizeof(kFragmentPrefix) - 1;
+   }
+-  strings[1] = (type == GL_VERTEX_SHADER) ? (char*)kVertexPrefix : kFragmentPrefix;
+-  lengths[1] = (type == GL_VERTEX_SHADER) ? sizeof(kVertexPrefix) - 1 : sizeof(kFragmentPrefix) - 1;
+-  strings[2] = (GLchar *)data + skip;
+-  lengths[2] = (int)(size - skip);
++  strings[2] = (GLchar *)data;
++  lengths[2] = (int)size;
+   uint shader = glCreateShader(type);
+   glShaderSource(shader, 3, strings, lengths);
+   glCompileShader(shader);
++  free(data);
+   glGetShaderiv(shader, GL_COMPILE_STATUS, &compile_status);
+   buffer[0] = 0;
+   glGetShaderInfoLog(shader, sizeof(buffer), NULL, buffer);
+@@ -305,7 +337,15 @@ static void GlslShader_GetUniforms(GlslShader *gs) {
+     }
+     for (int j = 0; j < gs->n_pass; j++) {
+       GlslTextureUniform_Read(program, "Pass", j, &p->unif.Pass[j]);
++    }
++    /* PassPrevN may reach back to the original input (N == pass index). */
++    for (int j = 0; j <= gs->n_pass && j < kGlslMaxPasses; j++)
+       GlslTextureUniform_Read(program, "PassPrev", j, &p->unif.PassPrev[j]);
++    for (int j = 1; j <= gs->n_pass; j++) {
++      p->unif.Alias[j].Texture = p->unif.Alias[j].InputSize = -1;
++      p->unif.Alias[j].TextureSize = p->unif.Alias[j].TexCoord = -1;
++      if (gs->pass[j].alias && gs->pass[j].alias[0])
++        GlslTextureUniform_Read(program, gs->pass[j].alias, -1, &p->unif.Alias[j]);
+     }
+     GlslTexture *t = gs->first_texture;
+     for (int j = 0; t != NULL; t = t->next, j++)
+@@ -456,6 +496,7 @@ void GlslShader_Destroy(GlslShader *gs) {
+     glDeleteTextures(1, &p->gl_texture);
+     glDeleteFramebuffers(1, &p->gl_fbo);
+     free(p->filename);
++    free(p->alias);
+   }
+   free(gs->pass);
+   GlslTexture *t;
+@@ -479,7 +520,7 @@ void GlslShader_Destroy(GlslShader *gs) {
+ }
+ 
+ enum {
+-  kMaxVaosInRenderCtx = 11 + kGlslMaxPasses * 2
++  kMaxVaosInRenderCtx = 11 + kGlslMaxPasses * 3
+ };
+ 
+ typedef struct RenderCtx {
+@@ -548,8 +589,13 @@ static void GlslShader_SetShaderVars(GlslShader *gs, RenderCtx *ctx, int pass) {
+   for (int i = 1; i < pass; i++)
+     RenderCtx_SetGlslTextureUniform(ctx, &p->unif.Pass[i], gs->pass[i].width, gs->pass[i].height, gs->pass[i].gl_texture);
+   // PassPrevX uniforms
++  for (int i = 0; i < pass; i++)
++    if (pass - i < kGlslMaxPasses)
++      RenderCtx_SetGlslTextureUniform(ctx, &p->unif.PassPrev[pass - i], gs->pass[i].width, gs->pass[i].height, gs->pass[i].gl_texture);
++  // alias uniforms: an earlier pass named by its preset `aliasN`
+   for (int i = 1; i < pass; i++)
+-    RenderCtx_SetGlslTextureUniform(ctx, &p->unif.PassPrev[pass - i], gs->pass[i].width, gs->pass[i].height, gs->pass[i].gl_texture);
++    if (gs->pass[i].alias)
++      RenderCtx_SetGlslTextureUniform(ctx, &p->unif.Alias[i], gs->pass[i].width, gs->pass[i].height, gs->pass[i].gl_texture);
+   // #parameter uniforms
+   for (GlslParam *pa = gs->first_param; pa != NULL; pa = pa->next)
+     if (pa->uniform[pass] >= 0)
+diff --git a/runner/src/desktop/glsl_shader.h b/runner/src/desktop/glsl_shader.h
+index f4adb2f..efbafdf 100644
+--- a/runner/src/desktop/glsl_shader.h
++++ b/runner/src/desktop/glsl_shader.h
+@@ -36,11 +36,13 @@ typedef struct GlslUniforms {
+   GlslTextureUniform Prev[7];
+   GlslTextureUniform Pass[kGlslMaxPasses];
+   GlslTextureUniform PassPrev[kGlslMaxPasses];
++  GlslTextureUniform Alias[kGlslMaxPasses + 1];
+   int Texture[kGlslMaxTextures];
+ } GlslUniforms;
+ 
+ typedef struct GlslPass {
+   char *filename;
++  char *alias;
+   uint8 scale_type_x, scale_type_y;
+   bool float_framebuffer;
+   bool srgb_framebuffer;
+@@ -80,7 +82,7 @@ typedef struct GlslParam {
+   float value;
+   float min;
+   float max;
+-  uint uniform[kGlslMaxPasses];
++  uint uniform[kGlslMaxPasses + 1];
+ } GlslParam;
+ 
+ typedef struct GlslShader {
+diff --git a/runner/src/desktop/host_main.c b/runner/src/desktop/host_main.c
+index 254dda5..71a8380 100644
+--- a/runner/src/desktop/host_main.c
++++ b/runner/src/desktop/host_main.c
+@@ -18,6 +18,7 @@
+ #include <stdbool.h>
+ #include <assert.h>
+ #include <signal.h>
++#include <errno.h>
+ 
+ #include "debug_server.h"
+ #include "desktop/sdl_compat.h"
+@@ -1932,6 +1933,28 @@ static void OverlaySelftestPadTick(unsigned pump) {
+  * shapes: the save-state browser is an opaque full-rect panel, the rewind
+  * filmstrip belongs across the bottom third of the frame, annotating the
+  * moment it describes. */
++static void PresentTitleModal(void) {
++  const int base_w = g_frozen_w > 0 ? g_frozen_w : g_snes_width;
++  const int base_h = g_frozen_h > 0 ? g_frozen_h : g_snes_height;
++  const int draw_w = base_w * 2, draw_h = base_h * 2;
++  uint8 *pixel_buffer = 0;
++  int pitch = 0;
++  g_renderer_funcs.BeginDraw(draw_w, draw_h, &pixel_buffer, &pitch);
++  if (!pixel_buffer) {
++    g_renderer_funcs.EndDraw();
++    return;
++  }
++  if (g_frozen_w > 0 && g_frozen_h > 0)
++    snes_ovl_upscale_frame(pixel_buffer, pitch, draw_w, draw_h,
++                           (const uint32_t *)g_frozen_frame,
++                           g_frozen_w * 4, g_frozen_w, g_frozen_h);
++  else
++    memset(pixel_buffer, 0, (size_t)draw_h * (size_t)pitch);
++  if (g_game->draw_modal)
++    g_game->draw_modal(pixel_buffer, (size_t)pitch, draw_w, draw_h);
++  g_renderer_funcs.EndDraw();
++}
++
+ static void PresentFrozenWithOverlay(void) {
+   const uint32_t *panel = NULL;
+   int pw = 0, ph = 0;
+@@ -3917,6 +3940,17 @@ error_reading:;
+ 
+     double event_profile_start = ProfileStart();
+     while (SDL_PollEvent(&event)) {
++      if (g_game->on_gamepad_button &&
++          (event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP) &&
++          g_game->on_gamepad_button(SNESRECOMP_SDL_EVENT_BUTTON(event),
++                                    event.type == SDL_CONTROLLERBUTTONDOWN))
++        continue;
++      if (g_game->on_key && !snes_savestate_menu_is_open() &&
++          (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) &&
++          g_game->on_key(SNESRECOMP_SDL_EVENT_KEY(event), SNESRECOMP_SDL_EVENT_MOD(event),
++                         event.type == SDL_KEYDOWN,
++                         event.type == SDL_KEYDOWN && SNESRECOMP_SDL_EVENT_REPEAT(event)))
++        continue;
+       if (HandleDeviceEvent(&event))
+         continue;
+       switch (event.type) {
+@@ -3974,6 +4008,19 @@ error_reading:;
+     }
+ 
+     ProfileEnd(kProfileEvents, event_profile_start);
++    if (g_game->modal_active && g_game->modal_active()) {
++      /* A title-owned modal panel: the guest is frozen exactly like the
++       * save-state browser freezes it (no RtlRunFrame, no draw_ppu_frame);
++       * the last presented frame is re-presented with the panel on top. */
++      if (!audiopaused) {
++        audiopaused = true;
++        SetAudioPaused(true);
++      }
++      PresentTitleModal();
++      snes_host_clock_reset(&video_clock, MonotonicSeconds(), g_simulation_hz, presentation_hz);
++      SDL_Delay(16);
++      continue;
++    }
+     if (g_paused != audiopaused) {
+       audiopaused = g_paused;
+       SetAudioPaused(audiopaused);
+diff --git a/runner/src/desktop/host_main.h b/runner/src/desktop/host_main.h
+index 03b6f06..dbff2c4 100644
+--- a/runner/src/desktop/host_main.h
++++ b/runner/src/desktop/host_main.h
+@@ -197,6 +197,21 @@ typedef struct SnesDesktopHostGame {
+   /* After the gameplay loop ends, before SDL resources are destroyed or a
+    * relaunch begins. Stop title-owned workers here. No further frames run. */
+   void (*on_shutdown)(void);
++
++  /* ── Title-owned modal UI (an in-game options menu). All optional. ── */
++  /* Main-loop keyboard events, before the host's hotkeys. `key` is the SDL
++   * keycode, `mod` the SDL modifier state. Return nonzero to consume it. */
++  int (*on_key)(int key, int mod, int pressed, int repeat);
++  /* Main-loop controller button events (SDL gamepad button numbering),
++   * before the host maps them. Return nonzero to consume it. */
++  int (*on_gamepad_button)(int sdl_button, int pressed);
++  /* Polled once per main-loop iteration. Nonzero: the title's modal panel is
++   * up, so the guest stays frozen and the host re-presents the last frame
++   * with draw_modal over it (~60 Hz) instead of running a frame. */
++  int (*modal_active)(void);
++  /* Draw the modal panel into an ARGB8888 frame that already holds the last
++   * presented picture (upscaled 2x). */
++  void (*draw_modal)(uint8_t *dst, size_t pitch, int w, int h);
+ } SnesDesktopHostGame;
+ 
+ /* The whole program. Returns the process exit code. */
+diff --git a/runner/src/desktop/opengl.c b/runner/src/desktop/opengl.c
+index e9063a7..04fd04e 100644
+--- a/runner/src/desktop/opengl.c
++++ b/runner/src/desktop/opengl.c
+@@ -128,6 +128,62 @@ static void LoadShaderFromConfig(void) {
+     g_glsl_shader = GlslShader_CreateFromFile(want);
+ }
+ 
++/* Runtime preset switch (a game's in-game options menu). NULL/"" = off.
++ * The old chain is kept when the new preset fails to compile. The choice is
++ * also recorded as the configured shader so a Reconfigure (after the in-game
++ * launcher) keeps it instead of reverting to the startup value. */
++static bool g_gl_ready;
++static unsigned g_gl_present_count;
++bool OpenGLRenderer_SetShader(const char *path) {
++  if (!g_gl_ready) return false;
++  GlslShader *ns = NULL;
++  if (path && path[0]) {
++    ns = GlslShader_CreateFromFile(path);
++    if (!ns) return false;
++  }
++  if (g_glsl_shader) GlslShader_Destroy(g_glsl_shader);
++  g_glsl_shader = ns;
++  snprintf(g_shader_path, sizeof(g_shader_path), "%s", path ? path : "");
++  g_shader_resolved = true;
++  {
++    static char *owned;
++    free(owned);
++    owned = (path && path[0]) ? strdup(path) : NULL;
++    g_config.shader = owned;
++  }
++  return true;
++}
++
++bool OpenGLRenderer_IsActive(void) { return g_gl_ready; }
++
++/* Test hook: SNESRECOMP_GL_SHOT=<file.ppm> SNESRECOMP_GL_SHOT_FRAME=<n>
++ * [SNESRECOMP_GL_SHOT_COUNT=<k>] writes the final (post-shader) back buffer
++ * of the n-th presented frame (k frames, numbered, with COUNT). */
++static void MaybeGlShot(int w, int h) {
++  const char *path = getenv("SNESRECOMP_GL_SHOT");
++  const char *fr = getenv("SNESRECOMP_GL_SHOT_FRAME");
++  const char *cnt = getenv("SNESRECOMP_GL_SHOT_COUNT");
++  if (!path || !fr) return;
++  unsigned first = (unsigned)atoi(fr), n = cnt ? (unsigned)atoi(cnt) : 1;
++  if (g_gl_present_count < first || g_gl_present_count >= first + n) return;
++  char numbered[1100];
++  if (cnt) {
++    snprintf(numbered, sizeof(numbered), "%s.%05u.ppm", path, g_gl_present_count);
++    path = numbered;
++  }
++  unsigned char *px = (unsigned char *)malloc((size_t)w * h * 3);
++  if (!px) return;
++  glPixelStorei(GL_PACK_ALIGNMENT, 1);
++  glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
++  FILE *f = fopen(path, "wb");
++  if (f) {
++    fprintf(f, "P6\n%d %d\n255\n", w, h);
++    for (int y = h - 1; y >= 0; y--) fwrite(px + (size_t)y * w * 3, 1, (size_t)w * 3, f);
++    fclose(f);
++  }
++  free(px);
++}
++
+ static bool OpenGLRenderer_Init(SDL_Window *window) {
+   g_window = window;
+   g_context = SDL_GL_CreateContext(window);
+@@ -253,6 +309,7 @@ static bool OpenGLRenderer_Init(SDL_Window *window) {
+     printf("%s\n", infolog);
+   }
+ 
++  g_gl_ready = true;
+   LoadShaderFromConfig();
+ 
+   return true;
+@@ -426,6 +483,9 @@ static void OpenGLRenderer_EndDraw(void) {
+       g_screenshot_flash_start_time = -1.0;
+   }
+ 
++  g_gl_present_count++;
++  MaybeGlShot(drawable_width, drawable_height);
++
+   SDL_GL_SwapWindow(g_window);
+ }
+ 
+diff --git a/runner/src/desktop/opengl.h b/runner/src/desktop/opengl.h
+index e7ed472..fea8bdf 100644
+--- a/runner/src/desktop/opengl.h
++++ b/runner/src/desktop/opengl.h
+@@ -25,6 +25,15 @@ void snesrecomp_opengl_set_viewport(void (*compute)(int, int, int, int,
+ /* Capture the next fully composited OpenGL frame to screenshots/*.bmp. */
+ void OpenGLRenderer_RequestScreenshot(void);
+ 
++/* Swap the RetroArch .glslp preset at runtime (NULL/"" = off). False when
++ * the GL presenter is not active or the preset failed to compile (the old
++ * chain stays). */
++#include <stdbool.h>
++bool OpenGLRenderer_SetShader(const char *path);
++/* True once the OpenGL presenter initialized (the SDL presenter has no
++ * shader support). */
++bool OpenGLRenderer_IsActive(void);
++
+ #ifdef __cplusplus
+ }
+ #endif

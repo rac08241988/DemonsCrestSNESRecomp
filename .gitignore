@@ -44,3 +44,8 @@
 .github
 docs/WIDESCREEN_PLAN.md
 docs/WIDESCREEN.md
+
+# Third-party shader checkout and staged copies (scripts/fetch_shaders.sh)
+/third_party/
+/shaders/
+/rom/
