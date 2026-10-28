@@ -76,9 +76,22 @@ git clone -b shaders-120hz https://github.com/rac08241988/DemonsCrestSNESRecomp
 cd DemonsCrestSNESRecomp
 scripts/setup.sh --rom "/path/to/Demon's Crest (USA).sfc"   # submodules, framework patch, shaders, regen
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
-bash scripts/fetch_shaders.sh build          # stage shaders/ beside the exe
+# (shaders/ is staged beside the exe automatically when <repo>/shaders exists)
 # Windows exe from Linux:
 cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake -DCMAKE_BUILD_TYPE=Release
+```
+
+**Release builder zip (no game code).** Build the setup host from a tree with
+an empty `src/gen/`, then pack it. The packager refuses ROMs and generated C,
+and ships the patched sources plus `shaders/`, so the player's machine builds
+the game with the launcher's portable `cmake-clang-v1` toolchain:
+
+```sh
+scripts/setup.sh                              # no --rom: patch + shaders only
+cmake -S . -B build-setup -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
+      -DCMAKE_BUILD_TYPE=Release -DSNESRECOMP_SETUP_HOST=ON
+cmake --build build-setup
+scripts/package_release.sh build-setup windows-x64   # dist/demonscrest-<ver>-windows-x64.zip
 ```
 
 `setup.sh` checks your ROM against `rom_identity.txt` (sha256
