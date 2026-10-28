@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Apply patches/snesrecomp-dc.patch to the snesrecomp submodule (idempotent).
+# Apply patches/<submodule>-dc.patch to each framework submodule (idempotent).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-P="$ROOT/patches/snesrecomp-dc.patch"
-if git -C "$ROOT/snesrecomp" apply --reverse --check "$P" >/dev/null 2>&1; then
-  echo "already applied: $(basename "$P")"
-else
-  git -C "$ROOT/snesrecomp" apply --whitespace=nowarn "$P"; echo "applied: $(basename "$P")"
-fi
+for sub in snesrecomp recomp-ui; do
+  P="$ROOT/patches/$sub-dc.patch"
+  [ -f "$P" ] || continue
+  if git -C "$ROOT/$sub" apply --reverse --check "$P" >/dev/null 2>&1; then
+    echo "already applied: $(basename "$P")"
+  else
+    git -C "$ROOT/$sub" apply --whitespace=nowarn "$P"; echo "applied: $(basename "$P")"
+  fi
+done

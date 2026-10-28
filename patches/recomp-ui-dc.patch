@@ -1,0 +1,24 @@
+diff --git a/src/common/launcher_model.c b/src/common/launcher_model.c
+index 6e7afb6..f8451b7 100644
+--- a/src/common/launcher_model.c
++++ b/src/common/launcher_model.c
+@@ -3371,7 +3371,8 @@ void launcher_model_skip_toolchain_update(LauncherModel* m) {
+     m->setup_page = 1;
+     m->setup_error[0] = '\0';
+     safe_copy(m->setup_status, sizeof(m->setup_status),
+-              "Keeping current toolchain — continue with BIOS and disc.");
++              m->has_bios ? "Keeping current toolchain — continue with BIOS and disc."
++                                 : "Keeping current toolchain — pick your ROM.");
+ }
+ 
+ void launcher_model_start_ensure_toolchain(LauncherModel* m) {
+@@ -3493,7 +3494,8 @@ void launcher_model_poll_prepare_disc(LauncherModel* m) {
+             m->setup_page = 1;
+             m->setup_error[0] = '\0';
+             safe_copy(m->setup_status, sizeof(m->setup_status),
+-                      "Build tools ready — continue with BIOS and disc.");
++                      m->has_bios ? "Build tools ready — continue with BIOS and disc."
++                                  : "Build tools ready — pick your ROM.");
+         } else {
+             m->setup_status[0] = '\0';
+             safe_copy(m->setup_error, sizeof(m->setup_error),

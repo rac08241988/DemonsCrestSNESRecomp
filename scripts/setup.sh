@@ -2,7 +2,7 @@
 # Demon's Crest recomp (shaders + 120 Hz fork) - source setup.
 #
 # 1. Fetches the pinned git submodules (snesrecomp framework, recomp-ui).
-# 2. Applies patches/snesrecomp-dc.patch to the framework (options-menu and
+# 2. Applies patches/snesrecomp-dc.patch + recomp-ui-dc.patch to the framework (options-menu and
 #    interpolation host hooks, RetroArch multi-pass shader loader fixes,
 #    runtime shader switching). Safe to re-run.
 # 3. Optionally fetches the libretro GLSL shaders (GPL; see fetch_shaders.sh).

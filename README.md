@@ -5,7 +5,7 @@
 
 ## Play on Windows (no coding needed)
 
-1. Download the **setup zip** from this fork's
+1. Download `DemonsCrest-SNESRecomp-windows-x64-v1.0.0.zip` from this fork's
    [Releases](https://github.com/rac08241988/DemonsCrestSNESRecomp/releases)
    page and unzip it anywhere.
 2. Open `DemonsCrestSNESRecomp.exe`.
@@ -15,7 +15,13 @@
    the game on your PC, which takes a few minutes.
 5. Click **Play**. Next time, just open the exe.
 
-The zip has no game code and no ROM. Everything is built on your machine
+The zip has no game code and no ROM. It holds the setup exe, its DLLs, the
+GPL shaders, the prebuilt `snesrecomp-analyze.exe` (so no Rust install is
+needed) and the build tools/configs. The first run downloads a portable
+toolchain (about 800 MB) into `toolchain\` beside the exe and builds the game
+into `build\`; after that, opening the setup exe hands off to
+`build\DemonsCrestSNESRecomp.exe`. The zip root is flat with a single exe, so
+launchers such as Quiver Launcher pick it up automatically. Everything is built on your machine
 from your own cartridge dump. In game, press **F12** or **Escape** (or the
 pad **Guide** button) to open the Options menu, where you pick a CRT/RetroArch
 shader and the 120 Hz motion mode. Rewind is now **Shift+F12**.

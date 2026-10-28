@@ -1,5 +1,5 @@
 diff --git a/host/snesrecomp_codegen_host.c b/host/snesrecomp_codegen_host.c
-index 13040e4..9e660c8 100644
+index 13040e4..cebbb76 100644
 --- a/host/snesrecomp_codegen_host.c
 +++ b/host/snesrecomp_codegen_host.c
 @@ -496,6 +496,14 @@ static int collect_cache_bases(char bases[][1400], int max_n) {
@@ -149,6 +149,15 @@ index 13040e4..9e660c8 100644
              "  echo.\r\n"
              "  echo Build failed. Fix the errors above, then rebuild manually.\r\n"
              "  pause\r\n"
+@@ -1802,7 +1878,7 @@ void snesrecomp_codegen_host_apply(RecompLauncherCGameInfo* gi,
+ 
+     gi->prepare_with_progress = host_prepare_generate;
+     gi->prepare_use_selected_rom = 1;
+-    gi->prepare_section_title = "2. Generate C sources & rebuild";
++    gi->prepare_section_title = "Generate C sources & rebuild";
+     gi->prepare_busy_status = "Generating sources…";
+     gi->prepare_success_status = "Sources ready — building…";
+ 
 diff --git a/runner/src/desktop/glsl_shader.c b/runner/src/desktop/glsl_shader.c
 index 54f2464..8a5df82 100644
 --- a/runner/src/desktop/glsl_shader.c

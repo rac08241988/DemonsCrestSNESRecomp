@@ -233,7 +233,7 @@ void DcOptions_Init(void) {
   items[kItemShader].section = "Video";
   items[kItemShader].label = "Shader";
   items[kItemShader].description =
-      "RetroArch GLSL preset (shaders/presets). Needs OutputMethod = OpenGL.";
+      "RetroArch shader (OpenGL)";
   items[kItemShader].type = RECOMP_RUNTIME_UI_CHOICE;
   items[kItemShader].minimum = 0;
   items[kItemShader].maximum = (int)g_count - 1;
@@ -244,7 +244,7 @@ void DcOptions_Init(void) {
   items[kItemMotion].section = "Video";
   items[kItemMotion].label = "120Hz motion";
   items[kItemMotion].description =
-      "High-refresh presentation; game logic stays 60 Hz. Off = original.";
+      "120Hz output, 60Hz logic";
   items[kItemMotion].type = RECOMP_RUNTIME_UI_CHOICE;
   items[kItemMotion].minimum = 0;
   items[kItemMotion].maximum = 2;
