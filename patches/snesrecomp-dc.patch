@@ -1,3 +1,22 @@
+diff --git a/host/snesrecomp_codegen_host.c b/host/snesrecomp_codegen_host.c
+index 13040e4..3240ff6 100644
+--- a/host/snesrecomp_codegen_host.c
++++ b/host/snesrecomp_codegen_host.c
+@@ -496,6 +496,14 @@ static int collect_cache_bases(char bases[][1400], int max_n) {
+     const char* cache = getenv("RETCOMM_TOOLCHAIN_CACHE");
+     if (cache && cache[0] && n < max_n)
+         snprintf(bases[n++], 1400, "%s", cache);
++    /* Portable install (shaders-120hz fork): a download lands in
++     * <exe dir>/toolchain, so the whole app (toolchain, build/, settings)
++     * lives in the folder the player unzipped -- launcher managers such as
++     * Quiver install into Apps/<name>/ and expect exactly that. The shared
++     * RetComM caches below are still searched for an existing pack. */
++    if (g_exe_dir[0] && n < max_n &&
++        join_path(bases[n], 1400, g_exe_dir, "toolchain"))
++        ++n;
+     const char* data = getenv("RETCOMM_DATA_HOME");
+     if (data && data[0] && n < max_n &&
+         join_path(bases[n], 1400, data, "toolchains/" SNESRECOMP_TC_PACK))
 diff --git a/runner/src/desktop/glsl_shader.c b/runner/src/desktop/glsl_shader.c
 index 54f2464..8a5df82 100644
 --- a/runner/src/desktop/glsl_shader.c
