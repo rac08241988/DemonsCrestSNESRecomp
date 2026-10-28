@@ -1,5 +1,5 @@
 diff --git a/host/snesrecomp_codegen_host.c b/host/snesrecomp_codegen_host.c
-index 13040e4..3240ff6 100644
+index 13040e4..9e660c8 100644
 --- a/host/snesrecomp_codegen_host.c
 +++ b/host/snesrecomp_codegen_host.c
 @@ -496,6 +496,14 @@ static int collect_cache_bases(char bases[][1400], int max_n) {
@@ -17,6 +17,138 @@ index 13040e4..3240ff6 100644
      const char* data = getenv("RETCOMM_DATA_HOME");
      if (data && data[0] && n < max_n &&
          join_path(bases[n], 1400, data, "toolchains/" SNESRECOMP_TC_PACK))
+@@ -972,19 +980,59 @@ static void handle_progress_line(const char* line,
+     }
+ }
+ 
++
++/* Baseline coverage profile, mirroring the project regen scripts: when
++ * <cfg_dir>/tier2_coverage.json exists, pass it as --profile-manifest so the
++ * one-click builder generates the same code as tools/regen.sh. */
++static int profile_manifest_path(char* out, size_t cap) {
++    char rel[1200];
++    snprintf(rel, sizeof(rel), "%s/tier2_coverage.json", g_cfg_dir);
++    char abs_path[2400];
++    if (g_project_root[0] && !(rel[0] == '/' || (rel[0] && rel[1] == ':')))
++        snprintf(abs_path, sizeof(abs_path), "%s/%s", g_project_root, rel);
++    else
++        snprintf(abs_path, sizeof(abs_path), "%s", rel);
++    FILE* f = fopen(abs_path, "rb");
++    if (!f) return 0;
++    fclose(f);
++    snprintf(out, cap, "%s", abs_path);
++    return 1;
++}
++
++/* Optional project post-generate step (<root>/tools/post_generate.py),
++ * e.g. hook injection that tools/regen.sh runs after `generate`. */
++static int post_generate_script(char* out, size_t cap) {
++    char path[2400];
++    snprintf(path, sizeof(path), "%s/tools/post_generate.py",
++             g_project_root[0] ? g_project_root : ".");
++    FILE* f = fopen(path, "rb");
++    if (!f) return 0;
++    fclose(f);
++    snprintf(out, cap, "%s", path);
++    return 1;
++}
++
+ #if defined(_WIN32)
+ static int run_generate_win(const char* rom,
+                             RecompLauncherCPrepareProgressFn on_progress,
+                             void* progress_ctx, char* err_msg, size_t err_cap) {
+-    char cmdline[4096];
++    char cmdline[8192];
+     char crc_arg[96] = "";
+-    char sha_arg[160] = "";
++    char sha_arg[2800] = "";
+     if (g_cfg->expected_crc32 && g_cfg->expected_crc32[0])
+         snprintf(crc_arg, sizeof(crc_arg), " --expected-crc32 %s",
+                  g_cfg->expected_crc32);
+     if (g_cfg->expected_sha256 && g_cfg->expected_sha256[0])
+         snprintf(sha_arg, sizeof(sha_arg), " --expected-sha256 %s",
+                  g_cfg->expected_sha256);
++    {
++        char prof[2400];
++        if (profile_manifest_path(prof, sizeof(prof))) {
++            size_t n = strlen(sha_arg);
++            snprintf(sha_arg + n, sizeof(sha_arg) - n,
++                     " --profile-manifest \"%s\"", prof);
++        }
++    }
+ 
+     if (g_has_funcs_h) {
+         snprintf(cmdline, sizeof(cmdline),
+@@ -1022,7 +1070,7 @@ static int run_generate_win(const char* rom,
+     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+ 
+-    char mutable_cmd[4096];
++    char mutable_cmd[8192];
+     snprintf(mutable_cmd, sizeof(mutable_cmd), "%s", cmdline);
+     if (!CreateProcessA(NULL, mutable_cmd, NULL, NULL, TRUE, 0, NULL,
+                         g_project_root, &si, &pi)) {
+@@ -1112,6 +1160,11 @@ static int run_generate_posix(const char* rom,
+         argv[argc++] = "--expected-sha256";
+         argv[argc++] = (char*)g_cfg->expected_sha256;
+     }
++    static char prof_path[2400];
++    if (profile_manifest_path(prof_path, sizeof(prof_path))) {
++        argv[argc++] = "--profile-manifest";
++        argv[argc++] = prof_path;
++    }
+     argv[argc++] = "--json-progress";
+     argv[argc] = NULL;
+ 
+@@ -1198,6 +1251,26 @@ static int host_prepare_generate(const char* source_path, char* out_path,
+         return 0;
+ #endif
+ 
++    {
++        char script[2400];
++        if (post_generate_script(script, sizeof(script))) {
++            char cmd[6000];
++            unsigned long code = 1;
++            if (on_progress)
++                on_progress(progress_ctx, 0.97f, "Running project post-generate step…");
++            snprintf(cmd, sizeof(cmd),
++                     "\"%s\" \"%s\" --project-root \"%s\" --gen-dir \"%s\"",
++                     g_python, script, g_project_root[0] ? g_project_root : ".",
++                     g_out_dir);
++            step_log_line(cmd);
++            if (!run_cmdline_wait(cmd, &code) || code != 0) {
++                step_fail_message(err_msg, err_cap, "post-generate step",
++                                  (int)code);
++                return 0;
++            }
++        }
++    }
++
+     snprintf(out_path, out_cap, "%s", source_path);
+     if (on_progress)
+         on_progress(progress_ctx, 1.0f, "Generate complete");
+@@ -1272,13 +1345,16 @@ static int write_windows_deferred_rebuild_helper(char* err_msg, size_t err_cap)
+             "  )\r\n"
+             ")\r\n"
+             "echo Building...\r\n"
+-            /* The console shows the build live; the log keeps it for a
+-             * failure report after the window has gone. */
++            /* No pipe: cmd's errorlevel after a pipe is the LAST stage's
++             * (so a failed build looked like success), and the PowerShell
++             * tee is unavailable on stripped/compat systems. Build live to
++             * the console; on failure re-run the (incremental, fast) build
++             * into the log so the errors are kept for a report. */
+             "\"%%CMAKE%%\" --build \"%%BUILD_DIR%%\" --parallel "
+-            "--target \"%%TARGET%%\" 2>&1 | "
+-            "powershell -NoProfile -Command \"$input | Tee-Object -FilePath "
+-            "'%%BUILD_DIR%%\\snesrecomp_rebuild.log' -Append\"\r\n"
++            "--target \"%%TARGET%%\"\r\n"
+             "if errorlevel 1 (\r\n"
++            "  \"%%CMAKE%%\" --build \"%%BUILD_DIR%%\" --target \"%%TARGET%%\" "
++            ">> \"%%BUILD_DIR%%\\snesrecomp_rebuild.log\" 2>&1\r\n"
+             "  echo.\r\n"
+             "  echo Build failed. Fix the errors above, then rebuild manually.\r\n"
+             "  pause\r\n"
 diff --git a/runner/src/desktop/glsl_shader.c b/runner/src/desktop/glsl_shader.c
 index 54f2464..8a5df82 100644
 --- a/runner/src/desktop/glsl_shader.c
