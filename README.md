@@ -1,5 +1,8 @@
 # Demon's Crest Recompiled
 
+> This fork ships no game code, ROM data or game screenshots. The upstream
+> screenshots were removed on this branch.
+
 ## Play on Windows (no coding needed)
 
 1. Download the **setup zip** from this fork's
@@ -36,24 +39,6 @@ using your own legally dumped ROM.
 [Known issues](#known-issues) |
 [Build](#build) |
 [Run](#run)
-
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/screenshots/boss-battle.png" width="470" alt="Demon's Crest widescreen boss fight">
-      <br><strong>Widescreen gameplay</strong><br>The expanded field keeps the action and the HUD in view.
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/screenshots/clock-tower.png" width="470" alt="Demon's Crest widescreen clock tower stage">
-      <br><strong>Full-stage widescreen</strong><br>Backgrounds, sprites and effects extend into the margins.
-    </td>
-  </tr>
-</table>
-
-<p align="center">
-  <img src="docs/screenshots/mode7-map.png" width="880" alt="Demon's Crest Mode 7 overworld map in widescreen">
-  <br><strong>Mode 7 overworld</strong><br>The flying map fills the widened field, margins included.
-</p>
 
 > **You must legally own a copy of the game.** No ROM data is distributed with
 > this project, in the repository or in any release. The recompiled C is
@@ -135,29 +120,6 @@ frame-accuracy checks:
 - **Recording** (new): input can be recorded and replayed frame-exactly, and
   frames or a rolling buffer can be written to disk — see
   [`docs/RECORDING.md`](docs/RECORDING.md).
-
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/screenshots/ice-cavern-boss.png" width="470" alt="Ice cavern boss fight in widescreen">
-      <br><strong>Ice cavern boss</strong><br>A boss fight running from the recompiled code, HUD and crest icons included.
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/screenshots/aerial-form-mountains.png" width="470" alt="Aerial gargoyle form in the mountains">
-      <br><strong>Form switching</strong><br>The aerial form in the mountain stage, with the widened background.
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/screenshots/castle-flight.png" width="470" alt="Castle stage flight">
-      <br><strong>Castle stage</strong><br>Flight, layered backgrounds and the status bar all correct in the widened field.
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/screenshots/somulo-firewall.png" width="470" alt="First Battle of the game">
-      <br><strong>Somulo Fight</strong><br>First Battle of the game.
-    </td>
-  </tr>
-</table>
 
 ### Known issues
 
