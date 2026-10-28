@@ -147,13 +147,13 @@ static void dc_win_redirect_logs(int argc, char **argv)
     wchar_t *slash = wcsrchr(path, L'\\');
     if (!slash) return;
     wcscpy(slash + 1, L"DemonsCrest.log");
-    /* One file, one handle: stderr shares stdout's descriptor so the two
-     * streams never overwrite each other's bytes. */
-    if (_wfreopen(path, L"w", stdout)) {
-        setvbuf(stdout, NULL, _IONBF, 0);
-        if (_dup2(_fileno(stdout), _fileno(stderr)) == 0)
-            setvbuf(stderr, NULL, _IONBF, 0);
-    }
+    /* One file: stdout truncates it, then both streams append unbuffered, so
+     * each write lands at the current end and neither overwrites the other.
+     * (A GUI app's stderr FILE has no descriptor, so _dup2 alone misses it.) */
+    FILE *f = _wfreopen(path, L"w", stdout);
+    if (f) f = _wfreopen(path, L"a", stdout);
+    if (f) setvbuf(stdout, NULL, _IONBF, 0);
+    if (_wfreopen(path, L"a", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
 }
 #endif
 
@@ -161,6 +161,13 @@ int main(int argc, char **argv)
 {
 #ifdef _WIN32
     dc_win_redirect_logs(argc, argv);
+    {   /* --console is ours; keep it away from the framework's ROM/flag parser. */
+        int j = 1;
+        for (int i = 1; i < argc; i++)
+            if (strcmp(argv[i], "--console") != 0) argv[j++] = argv[i];
+        argv[j] = NULL;
+        argc = j;
+    }
 #endif
     return snesrecomp_desktop_main(&kGameHost, argc, argv);
 }
