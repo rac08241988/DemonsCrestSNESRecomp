@@ -70,6 +70,14 @@ snesrecomp_rom_identity(DemonsCrestSNESRecomp ${CMAKE_SOURCE_DIR}/rom_identity.t
 # still a hard error (the framework owns the message).
 snesrecomp_target_generated_code(DemonsCrestSNESRecomp ${CMAKE_SOURCE_DIR}/src/gen)
 
+# The playable Windows build opens without a console window (GUI subsystem);
+# src/main.c sends logs to DemonsCrest.log beside the exe, or to the calling
+# terminal / a new console with --console. The setup host stays a console app
+# so its generate/build child processes share one console.
+if(WIN32 AND NOT SNESRECOMP_SETUP_HOST)
+    set_target_properties(DemonsCrestSNESRecomp PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
 # Fase 4 widescreen hooks: the object loop's cull window is widened by the live
 # margin (src/dc_widescreen.c). The generated code is re-derived by
 # tools/regen.sh, so the injector runs as a build step and the generated

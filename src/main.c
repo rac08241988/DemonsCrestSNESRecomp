@@ -25,6 +25,7 @@
  * complete list of hooks and what each is for.
  */
 
+#include <string.h>
 #include "host_main.h"
 #include "game_rtl.h"
 #include "dc_display.h"
@@ -121,7 +122,42 @@ static const SnesDesktopHostGame kGameHost = {
 #ifndef __ANDROID__
 #undef main   /* desktop: keep plain main() even if SDL_main.h remapped it */
 #endif
+#ifdef _WIN32
+#include <windows.h>
+#include <wchar.h>
+/* The playable Windows build uses the GUI subsystem (no console window).
+ * Logs: a terminal launch attaches to that console; --console opens a new
+ * one; otherwise stdout/stderr go to DemonsCrest.log beside the exe. */
+static void dc_win_redirect_logs(int argc, char **argv)
+{
+    if (GetStdHandle(STD_ERROR_HANDLE)) return;   /* already redirected */
+    int want_console = 0;
+    for (int i = 1; i < argc; i++)
+        if (strcmp(argv[i], "--console") == 0) want_console = 1;
+    if (AttachConsole(ATTACH_PARENT_PROCESS) || (want_console && AllocConsole())) {
+        (void)freopen("CONOUT$", "w", stdout);
+        (void)freopen("CONOUT$", "w", stderr);
+        (void)freopen("CONIN$", "r", stdin);
+        return;
+    }
+    wchar_t path[MAX_PATH + 32];
+    DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    wchar_t *slash = wcsrchr(path, L'\\');
+    if (!slash) return;
+    wcscpy(slash + 1, L"DemonsCrest.log");
+    if (_wfreopen(path, L"w", stderr)) {
+        setvbuf(stderr, NULL, _IONBF, 0);
+        (void)_wfreopen(path, L"a", stdout);
+        setvbuf(stdout, NULL, _IONBF, 0);
+    }
+}
+#endif
+
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+    dc_win_redirect_logs(argc, argv);
+#endif
     return snesrecomp_desktop_main(&kGameHost, argc, argv);
 }
