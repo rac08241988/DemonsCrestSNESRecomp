@@ -22,3 +22,29 @@ index 6e7afb6..f8451b7 100644
          } else {
              m->setup_status[0] = '\0';
              safe_copy(m->setup_error, sizeof(m->setup_error),
+diff --git a/src/common/recomp_runtime_ui.c b/src/common/recomp_runtime_ui.c
+index 7011f90..649eff7 100644
+--- a/src/common/recomp_runtime_ui.c
++++ b/src/common/recomp_runtime_ui.c
+@@ -628,7 +628,7 @@ void recomp_runtime_ui_render_argb8888(RecompRuntimeUi *ui, void *pixels,
+         }
+     }
+ 
+-    const char *help = "UP/DOWN SELECT  LEFT/RIGHT CHANGE  ENTER ACCEPT";
++    const char *help = "UP/DOWN SELECT  L/R CHANGE  ENTER OK";
+     if (ui->in_section) {
+         const RecompRuntimeUiItem *item = recomp_runtime_ui_section_item(
+             ui, ui->section_index, ui->row_index);
+@@ -636,7 +636,11 @@ void recomp_runtime_ui_render_argb8888(RecompRuntimeUi *ui, void *pixels,
+     }
+     rect(pixels,width,height,pitch,panel_x+pad,footer_y-4*scale,
+          panel_w-pad*2,scale,border,255);
+-    draw_text(pixels,width,height,pitch,panel_x+pad,footer_y+3*scale,scale,
++    /* Shrink the footer text until it fits instead of clipping it. */
++    int help_scale = scale;
++    while (help_scale > 1 && text_width(help, help_scale) > panel_w - pad*2)
++        --help_scale;
++    draw_text(pixels,width,height,pitch,panel_x+pad,footer_y+3*scale,help_scale,
+               muted,help,panel_x+panel_w-pad);
+     if (ui->status_frames) {
+         int status_w = text_width(ui->status, scale);
