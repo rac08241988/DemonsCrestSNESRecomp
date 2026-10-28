@@ -74,6 +74,9 @@ Additions on top of upstream (no game code, ROM, or generated C is committed):
   unchanged). Escape had no binding in single-player play (the framework uses
   it only to leave a netplay session, which this target does not build, and to
   close its own save-state/rewind overlays, which still works).
+- **No console window on Windows** - the game exe is a GUI-subsystem app;
+  its log goes to `DemonsCrest.log` beside the exe. Run it from a terminal
+  (log prints there) or pass `--console` to open a log console.
 
 ### Setup and build
 

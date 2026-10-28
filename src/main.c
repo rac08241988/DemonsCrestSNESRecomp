@@ -125,6 +125,7 @@ static const SnesDesktopHostGame kGameHost = {
 #ifdef _WIN32
 #include <windows.h>
 #include <wchar.h>
+#include <io.h>
 /* The playable Windows build uses the GUI subsystem (no console window).
  * Logs: a terminal launch attaches to that console; --console opens a new
  * one; otherwise stdout/stderr go to DemonsCrest.log beside the exe. */
@@ -146,10 +147,12 @@ static void dc_win_redirect_logs(int argc, char **argv)
     wchar_t *slash = wcsrchr(path, L'\\');
     if (!slash) return;
     wcscpy(slash + 1, L"DemonsCrest.log");
-    if (_wfreopen(path, L"w", stderr)) {
-        setvbuf(stderr, NULL, _IONBF, 0);
-        (void)_wfreopen(path, L"a", stdout);
+    /* One file, one handle: stderr shares stdout's descriptor so the two
+     * streams never overwrite each other's bytes. */
+    if (_wfreopen(path, L"w", stdout)) {
         setvbuf(stdout, NULL, _IONBF, 0);
+        if (_dup2(_fileno(stdout), _fileno(stderr)) == 0)
+            setvbuf(stderr, NULL, _IONBF, 0);
     }
 }
 #endif
