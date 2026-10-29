@@ -51,6 +51,11 @@ void DcWidescreenAfterRaster(void);
 int DcWsObjectCullMargin(void);
 int DcWsLiveMargin(void);
 
+/* The Widescreen setting (0 Off, 1 Adaptive, 2 16:9, 3 21:9, 4 32:9): the mod
+ * feature the Mods screen edits, applied live. src/mods/dc_widescreen_plugin.c */
+int DcWidescreenSetting_Get(void);
+int DcWidescreenSetting_Set(int index);
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,7 +5,7 @@
 
 ## Play on Windows (no coding needed)
 
-1. Download `DemonsCrest-SNESRecomp-windows-x64-v1.0.0.zip` from this fork's
+1. Download `DemonsCrest-SNESRecomp-windows-x64-v1.0.1.zip` from this fork's
    [Releases](https://github.com/rac08241988/DemonsCrestSNESRecomp/releases)
    page and unzip it anywhere.
 2. Open `DemonsCrestSNESRecomp.exe`.
@@ -25,6 +25,74 @@ launchers such as Quiver Launcher pick it up automatically. Everything is built 
 from your own cartridge dump. In game, press **F12** or **Escape** (or the
 pad **Guide** button) to open the Options menu, where you pick a CRT/RetroArch
 shader and the 120 Hz motion mode. Rewind is now **Shift+F12**.
+
+> **Shaders work on Vulkan and OpenGL renderers only.** New configs default to
+> OpenGL. On another renderer (Direct3D, software) the Shader row says so
+> instead of applying one; switch Video > Renderer to OpenGL or Vulkan.
+
+## Controls & Shortcuts
+
+These are the default bindings from the code and `config.ini` (`[KeyMap]`).
+They are documented as shipped; v1.0.1 testing did not re-verify them. "View"
+is the Xbox View/Back button, which is SNES Select.
+
+| Action | Xbox controller | Keyboard |
+|---|---|---|
+| D-pad | D-pad | Arrow keys |
+| SNES A / B / X / Y | B / A / Y / X | X / Z / S / A |
+| SNES L / R | LB / RB | C / V |
+| Start / Select | Menu (Start) / View (Select) | Enter / Right Shift |
+| Options menu (pauses the game) | Guide | F12 or Esc |
+| Menu: move / change / accept / back | D-pad / Left-Right / A / B | Arrows / Left-Right / Enter or Space / Backspace |
+| Save-state browser | hold View (Select) + press RB | F11 |
+| Save-state browser: load / save / back | A / X / B | X / S / Esc or Backspace (1-9, 0, -, = pick a slot) |
+| Quick load / quick save slot 1-10 | - | F1-F10 / Shift+F1-F10 |
+| Rewind | hold View (Select) + press R3 | Shift+F12 |
+| Rewind: scrub / resume here / cancel | Left-Right / A / B | Left-Right / Enter or Space / Esc |
+| Open the launcher | hold View (Select) + press L3 | Ctrl+L |
+| Toggle widescreen | - | Alt+W |
+| Fullscreen | - | Alt+Enter |
+| Reset | - | Ctrl+R |
+| Pause / pause dimmed | - | Shift+P / P |
+| Turbo (fast-forward) | - | Tab |
+| Window bigger / smaller | - | Ctrl+Up / Ctrl+Down |
+| Volume up / down | - | Keypad + / Keypad - |
+| Show performance / toggle renderer | - | F / R |
+| Start/stop a recording | - | Alt+R |
+
+Menu prompts follow the controller family and match buttons by position:
+the bottom face button (A on Xbox) confirms and loads, the right one (B) goes
+back, and the left one (X) saves.
+
+## What's new in v1.0.1
+
+- **Shader menu fixed.** Left/Right now cycles every preset and Enter applies
+  it, on keyboard and pad. The choice is saved and defaults to Off. The list
+  has 346 presets:
+  - the full libretro **slang** pack (`.slangp`), staged exactly like N64 Recomp
+    Magical Tetris: the same pinned `slang-shaders` commit `e1d75632`, its 12
+    license-audited presets first, then all 246 of `presets/`;
+  - the 88 `.glslp` presets.
+
+  Slang presets run through **librashader** on both the **OpenGL** and the
+  **Vulkan** renderer. They ship as unmodified source with their licenses
+  (`shaders/slang/LICENSES`, `manifest.txt`; see [`SHADERS.md`](SHADERS.md)).
+- **Black picture with slang presets on OpenGL fixed.** The game texture was
+  sampled as mip-incomplete, so every pass read black.
+- **The in-game Options menu now has every launcher setting**, in sections:
+  Video, Save States, Display, Audio, Controls and System. Settings that only
+  take effect after a restart are labelled so.
+- **Widescreen row** (Off / Adaptive / 16:9 / 21:9 / 32:9), applied live, in
+  both the in-game menu and the launcher.
+- **Save State / Load State** next to Video, with a slot selector. There is no
+  autosave.
+- **Xbox-style prompts.** Prompts follow the controller family and match by
+  position (A confirm/load, B back, X save) in the options, save-state and
+  rewind menus.
+- **New configs default to OpenGL.**
+- **Known issue (deferred):** on some PCs the screen goes black when switching
+  the shader back to **Off**. If it happens, restart the game. A fix is
+  planned for a later release.
 
 ---
 
@@ -59,10 +127,12 @@ Additions on top of upstream (no game code, ROM, or generated C is committed):
   gamepad **Guide** button. Arrows / D-pad move, Left/Right change, Enter or
   pad A accepts, Backspace or pad B goes back, Escape / F12 / Guide close it.
   The game pauses while it is open.
-- **Shader** - every root-level RetroArch `.glslp` preset from
-  libretro/glsl-shaders (commit cba01a48), applied live. Needs
-  `OutputMethod = OpenGL` (now the default). Chosen only from this menu;
-  `config.ini`'s `Shader` key is ignored.
+- **Shader** - the full libretro slang pack (librashader, OpenGL and Vulkan
+  renderers; packaging mirrors N64 Recomp Magical Tetris, see
+  [`SHADERS.md`](SHADERS.md)) plus the RetroArch `.glslp` presets from
+  libretro/glsl-shaders (commit cba01a48), applied live with Left/Right +
+  Enter. Shaders work on Vulkan and OpenGL renderers only. Chosen only from
+  this menu; `config.ini`'s `Shader` key is ignored.
 - **120Hz motion** - Off / Interpolate / Low-latency. Game logic stays at
   60 Hz; on a 100 Hz+ display each in-between frame is re-rendered with
   interpolated scroll and sprite positions (widescreen aware). Interpolate is
@@ -107,7 +177,7 @@ scripts/package_release.sh build-setup windows-x64   # dist/demonscrest-<ver>-wi
 `18d40a80...5844de`, a 512-byte copier header is stripped) before generating
 code. Fork note: upstream's `snesrecomp` gitlink `a085bfc` is not published
 on magnopaz/snesrecomp, so this branch pins `88d24ef`
-(`demons-crest/host-hooks`). Test hooks: `DC_SHADER_PRESET=<label>`,
+(`demons-crest/host-hooks`). Test hooks: `DC_SHADER_PRESET=<id>` (e.g. `slang/crt-geom-simple`, `glsl/crt-easymode`),
 `DC_MOTION=off|interpolate|lowlatency`, `DC_INTERP_HZ=<hz>`. Licensing of the
 additions: see [`NOTICE.md`](NOTICE.md).
 
@@ -148,7 +218,8 @@ frame-accuracy checks:
 Found while using the runner as a reference for a native port. None of them stop
 normal play, but they matter to anyone scripting or capturing the game.
 
-1. **Save states do not restore the CPU.** Loading a state brings back
+1. **Save states do not restore the CPU** (upstream note; in v1.0.1 testing,
+   a stage-1 state loaded back pixel-identical and play continued). Loading a state brings back
    WRAM/VRAM/CGRAM/OAM, but the 65816 starts from reset: the screen shows the
    Capcom copyright while the memory still holds the saved scene. A state made
    during a boss fight therefore cannot be resumed or screenshotted — the game
@@ -177,7 +248,7 @@ normal play, but they matter to anyone scripting or capturing the game.
 |:---------:|---------|--------------|
 | &#9745; | **Adaptive widescreen** | Native widened field with adaptive, 16:9, 21:9 and 32:9 views. Disabled by default; with it off the game renders at the original 256-pixel width. |
 | &#9745; | **Save states** | Ten slots (`F1`–`F10` load, `Shift+F1`–`Shift+F10` save) plus the save-state browser (`F11`). States load in a fresh process, but they do not restore the CPU — see [Known issues](#known-issues). |
-| &#9745; | **Rewind** | Rewind history (`F12`) over the shared framework's snapshot ring. |
+| &#9745; | **Rewind** | Rewind history (`Shift+F12`, or hold View + press R3) over the shared framework's snapshot ring. |
 | &#9745; | **Recording** | **Alt+R** starts/stops a take: one BMP per presented frame plus a replayable `input_log.jsonl`, in `captures/rec_<time>/`. Needs no debug server; the protocol can additionally replay the pad stream frame-exactly or keep a rolling capture. See [`docs/RECORDING.md`](docs/RECORDING.md). |
 | &#9745; | **Launcher** | `recomp-ui` ROM picker with a verification badge, display/audio/input settings and the Mods screen. |
 | &#9745; | **ROM verification** | The ROM is checked against the project digests before anything boots; a mismatched dump is refused instead of mis-executing. |
@@ -185,9 +256,14 @@ normal play, but they matter to anyone scripting or capturing the game.
 
 ## Widescreen
 
-Enable **Widescreen** in the launcher's **Mods** screen and pick a view:
-**Adaptive**, **16:9** (342 px), **21:9** (448 px) or **32:9** (682 px). The
-mod is off by default.
+Pick **Widescreen** in the in-game Options menu (Video > Widescreen, applied
+live) or in the launcher: **Off**, **Adaptive**, **16:9** (342 px), **21:9**
+(448 px) or **32:9** (682 px). It is off by default.
+
+A stage screenshot (stage 1 at 21:9, and one at 16:9) was taken while testing
+v1.0.1. It is not committed, because this fork ships no game screenshots. In
+that scene, the opening of the stage-1 dragon fight, the margins showed the
+sprites but stayed dark behind them.
 
 What it does:
 
@@ -304,7 +380,7 @@ Either way the ROM is checked against the digests below before anything boots �
 a dump that could not have produced this build is refused at the door rather
 than mis-executing ten frames in.
 
-During play: `F11` opens the save-state browser and `F12` opens rewind; both
+During play: `F11` opens the save-state browser and `Shift+F12` opens rewind (`F12` opens the Options menu); both
 pause gameplay while you choose. **Alt+R starts/stops a recording** (frames plus
 a replayable input log, saved under `captures/`). Hotkeys, controller mappings
 and pixel/aspect options live in the launcher; `Alt+R` can be moved with

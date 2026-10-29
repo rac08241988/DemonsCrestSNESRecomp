@@ -79,6 +79,22 @@ static int DcWindowWidth(int frame_width) {
         frame_width, SnesDisplayAspect_Clamp(g_config.display_aspect));
 }
 
+/* Widescreen in the launcher's Settings > Video (Display) as well as on the
+ * Mods screen: the host-owned aspect row carries this title's choices, and
+ * get/set route them to the same mod feature (dc_widescreen_plugin.c). */
+static const char *const kDcWidescreenLabels[] = {"Off", "Adaptive", "16:9", "21:9", "32:9"};
+static int g_dc_ws_seeded = -1;
+static int DcLauncherWidescreenGet(void) {
+    g_dc_ws_seeded = DcWidescreenSetting_Get();
+    return g_dc_ws_seeded;
+}
+static void DcLauncherWidescreenSet(int index) {
+    /* Only a change made on this row: an edit on the Mods screen in the same
+     * launcher visit already went to state.toml and must not be undone. */
+    if (index != g_dc_ws_seeded) DcWidescreenSetting_Set(index);
+    g_dc_ws_seeded = index;
+}
+
 static const SnesDesktopHostGame kGameHost = {
     .display_name        = "Demon's Crest",
     .window_title        = "Demon's Crest",
@@ -117,6 +133,18 @@ static const SnesDesktopHostGame kGameHost = {
      * in-between frames (game logic stays at 60 Hz). */
     .presentation_hz     = DcInterp_PresentationHz,
     .draw_frame          = DcInterp_DrawFrame,
+    /* Ctrl+L / Select+L3 and the in-game Options' "Keybinds & controller"
+     * row open the launcher mid-game; renderer / audio-rate / mod changes
+     * restart and resume at the same moment. */
+    .in_game_launcher    = 1,
+    .aspect_labels        = kDcWidescreenLabels,
+    .num_aspect_labels    = 5,
+    .aspect_setting_label = "Widescreen",
+    .aspect_setting_help  =
+        "Show the stage beyond the 256-column view (the Widescreen mod). "
+        "Adaptive fits the window; 16:9, 21:9 and 32:9 are fixed views.",
+    .aspect_get           = DcLauncherWidescreenGet,
+    .aspect_set           = DcLauncherWidescreenSet,
 };
 
 #ifndef __ANDROID__

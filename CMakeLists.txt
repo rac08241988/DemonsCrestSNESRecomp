@@ -50,6 +50,9 @@ add_executable(DemonsCrestSNESRecomp
     src/mods/dc_widescreen_plugin.c
     # In-game Options menu (F12): RetroArch shader presets + 120 Hz motion.
     src/dc_options.c
+    # librashader (loaded at runtime, never linked): libretro slang presets on
+    # the OpenGL presenter and on SDL's Vulkan renderer.
+    src/dc_libra.c
     src/dc_interp.c
     src/dc_default_config.c
 )
@@ -58,6 +61,11 @@ add_executable(DemonsCrestSNESRecomp
 # turns it into snesrecomp_rom_identity.h (SNESRECOMP_ROM_EXPECTED_SHA256 and
 # friends) for src/main.c, and tools/regen.sh, scripts/package_release.sh and
 # the release workflow read the same file. A revision bump is one edit there.
+target_include_directories(DemonsCrestSNESRecomp PRIVATE
+    ${CMAKE_SOURCE_DIR}/vendor/librashader/include
+    ${CMAKE_SOURCE_DIR}/vendor/vulkan-headers/include)
+target_link_libraries(DemonsCrestSNESRecomp PRIVATE ${CMAKE_DL_LIBS})
+
 snesrecomp_rom_identity(DemonsCrestSNESRecomp ${CMAKE_SOURCE_DIR}/rom_identity.txt)
 
 # Generated recompiler output. Not committed: it is derived from a copyrighted
@@ -116,7 +124,7 @@ snesrecomp_target_mod_catalog(DemonsCrestSNESRecomp ${CMAKE_SOURCE_DIR}/mods/pre
 # Not tracked: scripts/fetch_shaders.sh stages libretro/glsl-shaders into
 # <repo>/shaders, and a setup pack ships that folder at its root, so the
 # player's rebuild puts it beside the playable exe too.
-if(EXISTS ${CMAKE_SOURCE_DIR}/shaders/presets)
+if(EXISTS ${CMAKE_SOURCE_DIR}/shaders/presets OR EXISTS ${CMAKE_SOURCE_DIR}/shaders/slang)
     snesrecomp_target_stage_dir(DemonsCrestSNESRecomp ${CMAKE_SOURCE_DIR}/shaders shaders)
 endif()
 # Any other directory the game reads exe-relative (a translations/ table, ...)
