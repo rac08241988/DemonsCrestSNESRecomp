@@ -16,7 +16,6 @@
 #include "dc_libra.h"
 #include "dc_widescreen.h"
 #include "recomp_runtime_ui.h"
-#include "snes_overlay_draw.h" /* snes_ovl_pad_style: controller family */
 #include "desktop/config.h"
 #include "desktop/host_main.h"
 #include "desktop/opengl.h"
@@ -830,17 +829,8 @@ int DcOptions_OnGamepadButton(int b, int pressed) {
   case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return feed(RECOMP_RUNTIME_UI_INPUT_DOWN, pressed, 0);
   case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return feed(RECOMP_RUNTIME_UI_INPUT_LEFT, pressed, 0);
   case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return feed(RECOMP_RUNTIME_UI_INPUT_RIGHT, pressed, 0);
-  /* Same convention as the save-state browser and rewind: Xbox/PlayStation
-   * south (A / Cross) accepts and east (B / Circle) backs out; a Nintendo
-   * pad accepts on A (east) and backs out on B (south). */
-  case SDL_CONTROLLER_BUTTON_A:
-    return feed(snes_ovl_pad_style() == SNES_OVL_PAD_NINTENDO ? RECOMP_RUNTIME_UI_INPUT_BACK
-                                                              : RECOMP_RUNTIME_UI_INPUT_ACCEPT,
-                pressed, 0);
-  case SDL_CONTROLLER_BUTTON_B:
-    return feed(snes_ovl_pad_style() == SNES_OVL_PAD_NINTENDO ? RECOMP_RUNTIME_UI_INPUT_ACCEPT
-                                                              : RECOMP_RUNTIME_UI_INPUT_BACK,
-                pressed, 0);
+  case SDL_CONTROLLER_BUTTON_A: return feed(RECOMP_RUNTIME_UI_INPUT_ACCEPT, pressed, 0);
+  case SDL_CONTROLLER_BUTTON_B: return feed(RECOMP_RUNTIME_UI_INPUT_BACK, pressed, 0);
   case SDL_CONTROLLER_BUTTON_START: return feed(RECOMP_RUNTIME_UI_INPUT_TOGGLE, pressed, 0);
   default: return 1;
   }

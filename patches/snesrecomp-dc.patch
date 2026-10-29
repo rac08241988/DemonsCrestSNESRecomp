@@ -331,7 +331,7 @@ index f4adb2f..efbafdf 100644
  
  typedef struct GlslShader {
 diff --git a/runner/src/desktop/host_main.c b/runner/src/desktop/host_main.c
-index 254dda5..af1bdd1 100644
+index 254dda5..178c6fa 100644
 --- a/runner/src/desktop/host_main.c
 +++ b/runner/src/desktop/host_main.c
 @@ -18,6 +18,7 @@
@@ -358,100 +358,7 @@ index 254dda5..af1bdd1 100644
  static uint64_t g_state_generation;
  
  /* The last field actually presented, kept so an overlay can freeze the guest
-@@ -1579,8 +1589,74 @@ static void DrawPpuFrameWithPerf(void) {
- 
- /* Seat-0 input word the overlays navigate with — the same sources the guest
-  * gets, minus the script (an overlay is a human facility). */
-+/* The overlays (save-state browser, rewind) act on three meanings carried
-+ * in SNES bits -- A = confirm (load / commit), B = back, X = the alternate
-+ * action (save) -- plus Select+R to close the browser by its own gesture.
-+ * A pad reaches them by PHYSICAL button and controller family, not through
-+ * the game's [GamepadMap]: that map is positional for gameplay (pad south =
-+ * SNES B), which made Xbox B -- the universal "back" -- LOAD a state. The
-+ * table is the one snes_overlay_draw.h documents, so the prompts drawn there
-+ * always name the button that does it:
-+ *   Xbox / generic / PlayStation: south confirm, east back, west alternate
-+ *   Nintendo: east (A) confirm, south (B) back, north (X) alternate */
-+static uint32 g_overlay_pad_nav;
-+
-+static int PadStyleForGamepad(const GamepadInfo *gi) {
-+#if SNESRECOMP_SDL3
-+  if (gi && !gi->raw_joystick) {
-+    switch (SDL_GetGamepadTypeForID(gi->joystick_id)) {
-+    case SDL_GAMEPAD_TYPE_PS3:
-+    case SDL_GAMEPAD_TYPE_PS4:
-+    case SDL_GAMEPAD_TYPE_PS5:
-+      return SNES_OVL_PAD_PLAYSTATION;
-+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
-+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
-+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
-+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
-+      return SNES_OVL_PAD_NINTENDO;
-+    default:
-+      break;
-+    }
-+  }
-+#else
-+  (void)gi;
-+#endif
-+  return SNES_OVL_PAD_XBOX;
-+}
-+
-+static uint32 OverlayPadBit(int style, int button) {
-+  const bool nin = style == SNES_OVL_PAD_NINTENDO;
-+  switch (button) {
-+  case kGamepadBtn_A: return nin ? SNES_PAD_B : SNES_PAD_A;   /* south */
-+  case kGamepadBtn_B: return nin ? SNES_PAD_A : SNES_PAD_B;   /* east */
-+  case kGamepadBtn_X: return nin ? 0 : SNES_PAD_X;            /* west */
-+  case kGamepadBtn_Y: return nin ? SNES_PAD_X : 0;            /* north */
-+  case kGamepadBtn_Back: return SNES_PAD_SELECT;
-+  case kGamepadBtn_Start: return SNES_PAD_START;
-+  case kGamepadBtn_R1: return SNES_PAD_R;
-+  case kGamepadBtn_L1: return SNES_PAD_L;
-+  case kGamepadBtn_DpadUp: return SNES_PAD_UP;
-+  case kGamepadBtn_DpadDown: return SNES_PAD_DOWN;
-+  case kGamepadBtn_DpadLeft: return SNES_PAD_LEFT;
-+  case kGamepadBtn_DpadRight: return SNES_PAD_RIGHT;
-+  default: return 0;
-+  }
-+}
-+
-+/* Seat 0's physical buttons, re-derived on every press/release so a family
-+ * change mid-hold cannot leave a stale bit behind. */
-+static void OverlayPadNote(GamepadInfo *gi) {
-+  if (!gi || gi->index != 0) return;
-+  const int style = PadStyleForGamepad(gi);
-+  uint32 bits = 0;
-+  for (int b = 0; b < kGamepadBtn_Count; b++)
-+    if (gi->modifiers & (1u << b)) bits |= OverlayPadBit(style, b);
-+  g_overlay_pad_nav = bits;
-+  snes_ovl_set_pad_style(style);
-+}
-+
- static uint32 OverlayNavInputs(void) {
--  return g_input_state | g_pad_buttons | g_gamepad[0].axis_buttons;
-+  return g_input_state | g_overlay_pad_nav | g_gamepad[0].axis_buttons;
- }
- 
- /* Controller and joystick events, in ONE place, because the overlays' modal
-@@ -1905,11 +1981,11 @@ static void OverlaySelftestPadTick(unsigned pump) {
-   case 2:  SelftestPadReleaseAll(); break;
-   case 6:  SelftestPadSet(nav, true); break;
-   case 9:  SelftestPadSet(nav, false); break;
--  /* SDL's south button: SNES B under the default [GamepadMap] (pad "A"
--   * is the SNES B, pad "B" is the SNES A). The east button would be the
--   * SNES A -- load in the browser, commit in rewind -- which is exactly the
--   * wrong one to test "close" with, and this test first did. */
--  case 14: SelftestPadSet(SDL_CONTROLLER_BUTTON_A, true); break;
-+  /* Overlays read the pad by controller family (OverlayPadNav), not via
-+   * [GamepadMap]: on this Xbox-layout virtual pad the east button (Xbox B)
-+   * is Back and the south one (Xbox A) would load/commit -- exactly the
-+   * wrong one to test "close" with. */
-+  case 14: SelftestPadSet(SDL_CONTROLLER_BUTTON_B, true); break;
-   case 40:
-     fprintf(stderr, "[overlay_selftest_pad] FAIL: %s did not close from the pad within 40 pumps\n",
-             g_selftest_pad_phase == 1 ? "save-state browser" : "rewind");
-@@ -1932,6 +2008,28 @@ static void OverlaySelftestPadTick(unsigned pump) {
+@@ -1932,6 +1942,28 @@ static void OverlaySelftestPadTick(unsigned pump) {
   * shapes: the save-state browser is an opaque full-rect panel, the rewind
   * filmstrip belongs across the bottom third of the frame, annotating the
   * moment it describes. */
@@ -480,7 +387,7 @@ index 254dda5..af1bdd1 100644
  static void PresentFrozenWithOverlay(void) {
    const uint32_t *panel = NULL;
    int pw = 0, ph = 0;
-@@ -2284,10 +2382,16 @@ static SDL_Renderer *g_renderer;
+@@ -2284,10 +2316,16 @@ static SDL_Renderer *g_renderer;
  static SDL_Texture *g_texture;
  static SDL_Rect g_sdl_renderer_rect;
  static SDL_Rect g_sdl_present_rect;
@@ -498,7 +405,7 @@ index 254dda5..af1bdd1 100644
      fprintf(stderr, "Warning: Shaders are supported only with the OpenGL backend\n");
  
    /* SDL3 dropped the renderer flags argument (software vs accelerated is
-@@ -2367,16 +2471,35 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
+@@ -2367,16 +2405,35 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
                                     (void **)pixels, pitch)) {
      printf("Failed to lock texture: %s\n", SDL_GetError());
      *pixels = NULL;
@@ -537,7 +444,7 @@ index 254dda5..af1bdd1 100644
    SDL_RenderPresent(g_renderer);
  }
  
-@@ -2816,6 +2939,8 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
+@@ -2816,6 +2873,8 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
                                     : "Aspect ratio";
      gi->aspect_setting_help = game->aspect_setting_help;
    }
@@ -546,7 +453,7 @@ index 254dda5..af1bdd1 100644
    /* Rewind rows. The runtime has always had the ring; without this the
     * player has no way to size it or switch it off. */
    gi->has_rewind_depth = game->rewind_settings ? 1 : 0;
-@@ -2895,6 +3020,8 @@ static void LauncherCommit(const RecompLauncherCSettings *ls, const char *config
+@@ -2895,6 +2954,8 @@ static void LauncherCommit(const RecompLauncherCSettings *ls, const char *config
                                             ? kSnesVSync_Adaptive
                                             : kSnesVSync_On;
    RendererApply(ls->renderer);   /* sets renderer + output_method */
@@ -555,7 +462,7 @@ index 254dda5..af1bdd1 100644
  #if defined(SNES_HAS_LOBBY_CLIENT)
    /* The Netplay page persisted the name itself the moment it was
     * typed (snes_netplay_identity_store). g_config still holds what
-@@ -2999,12 +3126,65 @@ static const char *RestartReason(const Config *before, const char *rom,
+@@ -2999,12 +3060,65 @@ static const char *RestartReason(const Config *before, const char *rom,
    }
    return NULL;
  }
@@ -621,7 +528,7 @@ index 254dda5..af1bdd1 100644
  static void RunInGameLauncher(bool *running, const char **exit_reason) {
  #if !defined(RECOMP_LAUNCHER)
    (void)running; (void)exit_reason;
-@@ -3917,6 +4097,17 @@ error_reading:;
+@@ -3917,6 +4031,17 @@ error_reading:;
  
      double event_profile_start = ProfileStart();
      while (SDL_PollEvent(&event)) {
@@ -639,7 +546,7 @@ index 254dda5..af1bdd1 100644
        if (HandleDeviceEvent(&event))
          continue;
        switch (event.type) {
-@@ -3974,6 +4165,19 @@ error_reading:;
+@@ -3974,6 +4099,19 @@ error_reading:;
      }
  
      ProfileEnd(kProfileEvents, event_profile_start);
@@ -659,7 +566,7 @@ index 254dda5..af1bdd1 100644
      if (g_paused != audiopaused) {
        audiopaused = g_paused;
        SetAudioPaused(audiopaused);
-@@ -4264,6 +4468,10 @@ error_reading:;
+@@ -4264,6 +4402,10 @@ error_reading:;
        if (!running) break;
        continue;   /* guest was frozen: no frame to run or present */
      }
@@ -670,14 +577,6 @@ index 254dda5..af1bdd1 100644
      g_open_launcher_hotkey = 0;
      if ((g_rewind_hotkey || PadGesturePressed(&g_rewind_gesture)) && !snes_rewind_is_open() &&
          !snes_savestate_menu_is_open()) {
-@@ -4774,6 +4982,7 @@ static void HandleGamepadInput(GamepadInfo *gi, int button, bool pressed) {
-   if (!!(gi->modifiers & (1 << button)) == pressed)
-     return;
-   gi->modifiers ^= 1 << button;
-+  OverlayPadNote(gi);
-   if (pressed)
-     gi->last_cmd[button] = FindCmdForGamepadButton(button + gi->index * kGamepadBtn_Count, gi->modifiers);
-   if (gi->last_cmd[button] != 0)
 diff --git a/runner/src/desktop/host_main.h b/runner/src/desktop/host_main.h
 index 03b6f06..35789fc 100644
 --- a/runner/src/desktop/host_main.h
@@ -902,180 +801,3 @@ index e7ed472..6bfb768 100644
  #ifdef __cplusplus
  }
  #endif
-diff --git a/runner/src/snes_overlay_draw.c b/runner/src/snes_overlay_draw.c
-index 2652111..93c7ce5 100644
---- a/runner/src/snes_overlay_draw.c
-+++ b/runner/src/snes_overlay_draw.c
-@@ -112,6 +112,66 @@ void snes_ovl_draw_button(uint32_t *dst, int stride, int h_max,
-     snes_ovl_draw_char(dst, stride, h_max, x + 5, y + 5, label, col, 1);
- }
- 
-+static int s_pad_style = SNES_OVL_PAD_XBOX;
-+
-+void snes_ovl_set_pad_style(int style)
-+{
-+    if (style >= SNES_OVL_PAD_XBOX && style <= SNES_OVL_PAD_NINTENDO)
-+        s_pad_style = style;
-+}
-+
-+int snes_ovl_pad_style(void) { return s_pad_style; }
-+
-+static void ps_glyph(uint32_t *dst, int stride, int h_max, int x, int y,
-+                     int shape, uint32_t col)
-+{
-+    int i;
-+    snes_ovl_fill_disc(dst, stride, h_max, x + 9, y + 9, 9, col);
-+    snes_ovl_fill_disc(dst, stride, h_max, x + 9, y + 9, 8, 0xFF171B25u);
-+    switch (shape) {
-+    case 0: /* cross */
-+        for (i = 0; i < 9; i++) {
-+            snes_ovl_fill_rect(dst, stride, h_max, x + 5 + i, y + 5 + i, 2, 1, col);
-+            snes_ovl_fill_rect(dst, stride, h_max, x + 12 - i, y + 5 + i, 2, 1, col);
-+        }
-+        break;
-+    case 1: /* circle */
-+        snes_ovl_fill_disc(dst, stride, h_max, x + 9, y + 9, 5, col);
-+        snes_ovl_fill_disc(dst, stride, h_max, x + 9, y + 9, 3, 0xFF171B25u);
-+        break;
-+    default: /* square */
-+        snes_ovl_stroke_rect(dst, stride, h_max, x + 5, y + 5, 9, 9, col);
-+        snes_ovl_stroke_rect(dst, stride, h_max, x + 6, y + 6, 7, 7, col);
-+        break;
-+    }
-+}
-+
-+void snes_ovl_draw_action(uint32_t *dst, int stride, int h_max,
-+                          int x, int y, int action)
-+{
-+    switch (s_pad_style) {
-+    case SNES_OVL_PAD_PLAYSTATION: {
-+        static const uint32_t cols[3] = {0xFF7FB2FFu, 0xFFFF6B6Bu, 0xFFF08CDAu};
-+        ps_glyph(dst, stride, h_max, x, y, action, cols[action % 3]);
-+        break;
-+    }
-+    case SNES_OVL_PAD_NINTENDO: {
-+        /* Super Famicom colours: A red, B yellow, X blue. */
-+        static const char labels[3] = {'A', 'B', 'X'};
-+        static const uint32_t cols[3] = {0xFFFF6B6Bu, 0xFFFFD24Du, 0xFF5FA8FFu};
-+        snes_ovl_draw_button(dst, stride, h_max, x, y, labels[action % 3], cols[action % 3]);
-+        break;
-+    }
-+    default: {
-+        /* Xbox: A green, B red, X blue. */
-+        static const char labels[3] = {'A', 'B', 'X'};
-+        static const uint32_t cols[3] = {SNES_OVL_COL_A, SNES_OVL_COL_B, SNES_OVL_COL_X};
-+        snes_ovl_draw_button(dst, stride, h_max, x, y, labels[action % 3], cols[action % 3]);
-+        break;
-+    }
-+    }
-+}
-+
- /* ── Compositing an overlay panel into a host frame buffer ───────────────
-  *
-  * The overlays hand a host an ARGB panel and let it present that however it
-diff --git a/runner/src/snes_overlay_draw.h b/runner/src/snes_overlay_draw.h
-index e62d3cc..c3dc1d6 100644
---- a/runner/src/snes_overlay_draw.h
-+++ b/runner/src/snes_overlay_draw.h
-@@ -101,4 +101,32 @@ void snes_ovl_draw_button(uint32_t *dst, int stride, int h_max,
- #define SNES_OVL_COL_X  0xFF5FA8FFu
- #define SNES_OVL_COL_Y  0xFFFFD24Du
- 
-+/* Controller-aware prompts. The overlays act on three meanings -- confirm
-+ * (load / select / commit), back, and the alternate action (save) -- and the
-+ * host routes the PHYSICAL pad buttons onto them by the player's controller
-+ * family (desktop host_main.c, OverlayPadNav):
-+ *
-+ *   family       confirm        back           alternate
-+ *   Xbox/other   South (A)      East (B)       West (X)
-+ *   PlayStation  South (Cross)  East (Circle)  West (Square)
-+ *   Nintendo     East (A)       South (B)      North (X)
-+ *
-+ * so a prompt is drawn from the same table and always names the button that
-+ * does it. The host sets the family of the pad last used (default Xbox). */
-+enum {
-+    SNES_OVL_PAD_XBOX = 0,
-+    SNES_OVL_PAD_PLAYSTATION = 1,
-+    SNES_OVL_PAD_NINTENDO = 2
-+};
-+enum {
-+    SNES_OVL_ACT_CONFIRM = 0,
-+    SNES_OVL_ACT_BACK = 1,
-+    SNES_OVL_ACT_ALT = 2
-+};
-+void snes_ovl_set_pad_style(int style);
-+int snes_ovl_pad_style(void);
-+/* The 18x18 glyph for `action` in the current family's look. */
-+void snes_ovl_draw_action(uint32_t *dst, int stride, int h_max,
-+                          int x, int y, int action);
-+
- #endif /* SNES_OVERLAY_DRAW_H */
-diff --git a/runner/src/snes_rewind.c b/runner/src/snes_rewind.c
-index 3507658..66e3955 100644
---- a/runner/src/snes_rewind.c
-+++ b/runner/src/snes_rewind.c
-@@ -370,12 +370,12 @@ static void strip_hints(void) {
- 
-     snes_ovl_fill_rect(s_strip, RW_STRIP_W, RW_STRIP_H,
-                        0, band_y, RW_STRIP_W, band_h, 0xFF171B25u);
--    snes_ovl_draw_button(s_strip, RW_STRIP_W, RW_STRIP_H,
--                         12, btn_y, 'A', SNES_OVL_COL_A);
-+    snes_ovl_draw_action(s_strip, RW_STRIP_W, RW_STRIP_H,
-+                         12, btn_y, SNES_OVL_ACT_CONFIRM);
-     snes_ovl_draw_text(s_strip, RW_STRIP_W, RW_STRIP_H,
-                        36, btn_y + 5, "SELECT", 0xFFE2E5EBu, 1);
--    snes_ovl_draw_button(s_strip, RW_STRIP_W, RW_STRIP_H,
--                         120, btn_y, 'B', SNES_OVL_COL_B);
-+    snes_ovl_draw_action(s_strip, RW_STRIP_W, RW_STRIP_H,
-+                         120, btn_y, SNES_OVL_ACT_BACK);
-     snes_ovl_draw_text(s_strip, RW_STRIP_W, RW_STRIP_H,
-                        144, btn_y + 5, "BACK", 0xFFE2E5EBu, 1);
- }
-diff --git a/runner/src/snes_savestate_menu.c b/runner/src/snes_savestate_menu.c
-index bf4ae1a..e0d01a4 100644
---- a/runner/src/snes_savestate_menu.c
-+++ b/runner/src/snes_savestate_menu.c
-@@ -142,14 +142,8 @@ static void draw_text(uint32_t *dst, int x, int y, const char *s,
-     snes_ovl_draw_text(dst, SSM_W, SSM_H, x, y, s, col, scale);
- }
- 
--/* A SNES face button: filled disc with its letter punched out of the middle.
-- * The colours are the Super Famicom's, which is the closest thing the SNES
-- * has to psxrecomp's shape-coded PlayStation glyphs. */
--static void draw_snes_button(uint32_t *dst, int x, int y, char label,
--                             uint32_t col)
--{
--    snes_ovl_draw_button(dst, SSM_W, SSM_H, x, y, label, col);
--}
-+/* Controller family the hint row was drawn for (snes_overlay_draw.h). */
-+static int s_drawn_style = -1;
- 
- static void blit_thumb(uint32_t *dst, int x0, int y0, int w, int h,
-                        const uint32_t *src)
-@@ -335,11 +329,14 @@ static void rasterize_panel(void)
-     }
- 
-     fill_rect(s_panel, 0, 388, SSM_W, SSM_H - 388, 0xFF171B25u);
--    draw_snes_button(s_panel, 20, 398, 'A', 0xFF6BE06Bu);
-+    /* Glyphs follow the controller family the host routes the pad by
-+     * (snes_overlay_draw.h), so each names the button that does it. */
-+    s_drawn_style = snes_ovl_pad_style();
-+    snes_ovl_draw_action(s_panel, SSM_W, SSM_H, 20, 398, SNES_OVL_ACT_CONFIRM);
-     draw_text(s_panel, 44, 402, "LOAD", 0xFFE2E5EBu, 1);
--    draw_snes_button(s_panel, 116, 398, 'X', 0xFF5FA8FFu);
-+    snes_ovl_draw_action(s_panel, SSM_W, SSM_H, 116, 398, SNES_OVL_ACT_ALT);
-     draw_text(s_panel, 140, 402, "SAVE", 0xFFE2E5EBu, 1);
--    draw_snes_button(s_panel, 212, 398, 'B', 0xFFFF6B6Bu);
-+    snes_ovl_draw_action(s_panel, SSM_W, SSM_H, 212, 398, SNES_OVL_ACT_BACK);
-     draw_text(s_panel, 236, 402, "BACK", 0xFFE2E5EBu, 1);
-     draw_text(s_panel, 316, 402, "UP DOWN SLOT", 0xFF7F8796u, 1);
-     if (s_mirror)
-@@ -690,7 +687,7 @@ int snes_savestate_menu_overlay_image(const uint32_t **pixels, int *w, int *h)
-         if (h) *h = 0;
-         return 0;
-     }
--    if (s_dirty)
-+    if (s_dirty || s_drawn_style != snes_ovl_pad_style())
-         rasterize_panel();
-     if (pixels) *pixels = s_panel;
-     if (w) *w = SSM_W;

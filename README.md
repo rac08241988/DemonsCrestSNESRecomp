@@ -5,7 +5,7 @@
 
 ## Play on Windows (no coding needed)
 
-1. Download `DemonsCrest-SNESRecomp-windows-x64-v1.0.1.zip` from this fork's
+1. Download `DemonsCrest-SNESRecomp-windows-x64-v1.0.2.zip` from this fork's
    [Releases](https://github.com/rac08241988/DemonsCrestSNESRecomp/releases)
    page and unzip it anywhere.
 2. Open `DemonsCrestSNESRecomp.exe`.
@@ -33,7 +33,7 @@ shader and the 120 Hz motion mode. Rewind is now **Shift+F12**.
 ## Controls & Shortcuts
 
 These are the default bindings from the code and `config.ini` (`[KeyMap]`).
-They are documented as shipped; v1.0.1 testing did not re-verify them. "View"
+They are documented as shipped; v1.0.2 testing did not re-verify them. "View"
 is the Xbox View/Back button, which is SNES Select.
 
 | Action | Xbox controller | Keyboard |
@@ -45,10 +45,10 @@ is the Xbox View/Back button, which is SNES Select.
 | Options menu (pauses the game) | Guide | F12 or Esc |
 | Menu: move / change / accept / back | D-pad / Left-Right / A / B | Arrows / Left-Right / Enter or Space / Backspace |
 | Save-state browser | hold View (Select) + press RB | F11 |
-| Save-state browser: load / save / back | A / X / B | X / S / Esc or Backspace (1-9, 0, -, = pick a slot) |
+| Save-state browser: load / save / back | B / Y / A | X / S / Esc or Backspace (1-9, 0, -, = pick a slot) |
 | Quick load / quick save slot 1-10 | - | F1-F10 / Shift+F1-F10 |
 | Rewind | hold View (Select) + press R3 | Shift+F12 |
-| Rewind: scrub / resume here / cancel | Left-Right / A / B | Left-Right / Enter or Space / Esc |
+| Rewind: scrub / resume here / cancel | Left-Right / B / A | Left-Right / Enter or Space / Esc |
 | Open the launcher | hold View (Select) + press L3 | Ctrl+L |
 | Toggle widescreen | - | Alt+W |
 | Fullscreen | - | Alt+Enter |
@@ -60,9 +60,10 @@ is the Xbox View/Back button, which is SNES Select.
 | Show performance / toggle renderer | - | F / R |
 | Start/stop a recording | - | Alt+R |
 
-Menu prompts follow the controller family and match buttons by position:
-the bottom face button (A on Xbox) confirms and loads, the right one (B) goes
-back, and the left one (X) saves.
+The save-state browser and rewind read the pad through `[GamepadMap]`, the
+same mapping as gameplay, so their on-screen A / B / X prompts are **SNES**
+buttons: SNES A = Xbox B, SNES B = Xbox A, SNES X = Xbox Y with the default
+map. (The Options menu uses Xbox A to accept and Xbox B to go back.)
 
 ## Tested On
 
@@ -74,6 +75,30 @@ The project owner's PC:
 - Storage: M.2 NVMe SSD
 - OS: Windows and AtlasOS
 - Renderers tested: Vulkan and OpenGL
+
+## What's new in v1.0.2
+
+- **Controller fix: gameplay controls are back to v1.0.0.** v1.0.1's
+  "Xbox-style prompts" change re-routed the physical controller buttons by
+  controller family. It was meant only for the menus and prompts, but on a
+  real Xbox One controller it changed the controls for the whole game, and
+  players had to fix their bindings by hand in the launcher's Controller
+  screen. v1.0.2 rolls that change back to v1.0.0's controller handling: the
+  pad goes through `[GamepadMap]` everywhere again, and the family-based
+  routing, the per-family A/B swap in the Options menu and the
+  controller-family prompt glyphs are removed. Everything else from v1.0.1
+  (shaders, librashader, in-game settings, widescreen row, save-state rows)
+  is unchanged.
+- **If you rebound your controls by hand on v1.0.1**, open the launcher's
+  **Controller** screen and use **Reset to Defaults** to get the v1.0.0
+  layout back.
+- **Known issues:**
+  - on some PCs the screen goes black when switching the shader back to
+    **Off** (restart the game if it happens);
+  - Vulkan slang shaders do not load on some real GPUs
+    ([issue #1](https://github.com/rac08241988/DemonsCrestSNESRecomp/issues/1));
+    use the OpenGL renderer for shaders meanwhile;
+  - in widescreen, the margins are dark in the stage-1 dragon arena.
 
 ## What's new in v1.0.1
 
@@ -97,9 +122,8 @@ The project owner's PC:
   both the in-game menu and the launcher.
 - **Save State / Load State** next to Video, with a slot selector. There is no
   autosave.
-- **Xbox-style prompts.** Prompts follow the controller family and match by
-  position (A confirm/load, B back, X save) in the options, save-state and
-  rewind menus.
+- ~~**Xbox-style prompts.**~~ Rolled back in v1.0.2: it changed the gameplay
+  controls, not just the menus.
 - **New configs default to OpenGL.**
 - **Known issue (deferred):** on some PCs the screen goes black when switching
   the shader back to **Off**. If it happens, restart the game. A fix is
