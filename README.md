@@ -70,7 +70,7 @@ The project owner's PC:
 
 - CPU: AMD Ryzen 7 5800X3D (8 cores / 16 threads, 96 MB 3D V-Cache)
 - GPU: NVIDIA GeForce RTX 3070 Ti (8 GB GDDR6X)
-- RAM: dual-channel
+- RAM: 32 GB dual-channel
 - Storage: M.2 NVMe SSD
 - OS: Windows and AtlasOS
 - Renderers tested: Vulkan and OpenGL
