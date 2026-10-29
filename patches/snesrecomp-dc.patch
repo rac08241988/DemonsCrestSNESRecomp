@@ -331,7 +331,7 @@ index f4adb2f..efbafdf 100644
  
  typedef struct GlslShader {
 diff --git a/runner/src/desktop/host_main.c b/runner/src/desktop/host_main.c
-index 254dda5..178c6fa 100644
+index 254dda5..7a3654e 100644
 --- a/runner/src/desktop/host_main.c
 +++ b/runner/src/desktop/host_main.c
 @@ -18,6 +18,7 @@
@@ -358,36 +358,98 @@ index 254dda5..178c6fa 100644
  static uint64_t g_state_generation;
  
  /* The last field actually presented, kept so an overlay can freeze the guest
-@@ -1932,6 +1942,28 @@ static void OverlaySelftestPadTick(unsigned pump) {
+@@ -1932,6 +1942,90 @@ static void OverlaySelftestPadTick(unsigned pump) {
   * shapes: the save-state browser is an opaque full-rect panel, the rewind
   * filmstrip belongs across the bottom third of the frame, annotating the
   * moment it describes. */
++/* A layer the presenters draw OVER the finished (post-shader) picture:
++ * straight-alpha ARGB8888, stretched over the same viewport as the frame.
++ * Set only for the duration of one EndDraw. */
++static const uint32_t *g_present_overlay;
++static int g_present_overlay_w, g_present_overlay_h;
++bool snesrecomp_present_overlay(const uint32_t **argb, int *w, int *h) {
++  if (!g_present_overlay) return false;
++  *argb = g_present_overlay;
++  *w = g_present_overlay_w;
++  *h = g_present_overlay_h;
++  return true;
++}
++
 +static void PresentTitleModal(void) {
++  /* The game goes to the presenter at its OWN resolution, so the active
++   * shader chain (GLSL, or librashader on GL/Vulkan) processes the real
++   * field exactly as during play; the panel is drawn by the presenter on
++   * top of the shaded picture. Compositing the panel into a 2x nearest
++   * upscale of the field and shading THAT made the chain see 2x2 blocks as
++   * source pixels: the game behind the menu looked unshaded/blocky while
++   * the shader was applied to the panel's text instead. */
 +  const int base_w = g_frozen_w > 0 ? g_frozen_w : g_snes_width;
 +  const int base_h = g_frozen_h > 0 ? g_frozen_h : g_snes_height;
 +  const int draw_w = base_w * 2, draw_h = base_h * 2;
++  static uint32_t *ov_black, *ov_white;
++  static size_t ov_cap;
++  const size_t n = (size_t)draw_w * (size_t)draw_h;
++  if (n > ov_cap) {
++    free(ov_black);
++    free(ov_white);
++    ov_black = (uint32_t *)malloc(n * 4);
++    ov_white = (uint32_t *)malloc(n * 4);
++    ov_cap = (ov_black && ov_white) ? n : 0;
++  }
++  bool have_ov = false;
++  if (ov_cap && g_game->draw_modal) {
++    /* The panel module composites onto opaque pixels. Drawing it over black
++     * and over white recovers its coverage: on black the result is the
++     * premultiplied colour, and white minus black is 1 - alpha. */
++    memset(ov_black, 0x00, n * 4);
++    memset(ov_white, 0xFF, n * 4);
++    g_game->draw_modal((uint8_t *)ov_black, (size_t)draw_w * 4, draw_w, draw_h);
++    g_game->draw_modal((uint8_t *)ov_white, (size_t)draw_w * 4, draw_w, draw_h);
++    for (size_t i = 0; i < n; i++) {
++      const uint32_t b = ov_black[i], w = ov_white[i];
++      const int gb = (int)((b >> 8) & 255), gw = (int)((w >> 8) & 255);
++      int a = 255 - (gw - gb);
++      if (a <= 0) { ov_black[i] = 0; continue; }
++      if (a > 255) a = 255;
++      uint32_t r = (b >> 16) & 255, g = gb, bl = b & 255;
++      if (a < 255) {
++        r = r * 255u / (unsigned)a; if (r > 255) r = 255;
++        g = g * 255u / (unsigned)a; if (g > 255) g = 255;
++        bl = bl * 255u / (unsigned)a; if (bl > 255) bl = 255;
++      }
++      ov_black[i] = ((uint32_t)a << 24) | (r << 16) | (g << 8) | bl;
++    }
++    have_ov = true;
++  }
++
 +  uint8 *pixel_buffer = 0;
 +  int pitch = 0;
-+  g_renderer_funcs.BeginDraw(draw_w, draw_h, &pixel_buffer, &pitch);
++  g_renderer_funcs.BeginDraw(base_w, base_h, &pixel_buffer, &pitch);
 +  if (!pixel_buffer) {
 +    g_renderer_funcs.EndDraw();
 +    return;
 +  }
-+  if (g_frozen_w > 0 && g_frozen_h > 0)
-+    snes_ovl_upscale_frame(pixel_buffer, pitch, draw_w, draw_h,
-+                           (const uint32_t *)g_frozen_frame,
-+                           g_frozen_w * 4, g_frozen_w, g_frozen_h);
-+  else
-+    memset(pixel_buffer, 0, (size_t)draw_h * (size_t)pitch);
-+  if (g_game->draw_modal)
-+    g_game->draw_modal(pixel_buffer, (size_t)pitch, draw_w, draw_h);
++  if (g_frozen_w > 0 && g_frozen_h > 0) {
++    for (int y = 0; y < base_h; y++)
++      memcpy(pixel_buffer + (size_t)y * (size_t)pitch,
++             g_frozen_frame + (size_t)y * (size_t)g_frozen_w * 4,
++             (size_t)base_w * 4);
++  } else {
++    memset(pixel_buffer, 0, (size_t)base_h * (size_t)pitch);
++  }
++  if (have_ov) {
++    g_present_overlay = ov_black;
++    g_present_overlay_w = draw_w;
++    g_present_overlay_h = draw_h;
++  }
 +  g_renderer_funcs.EndDraw();
++  g_present_overlay = NULL;
 +}
 +
  static void PresentFrozenWithOverlay(void) {
    const uint32_t *panel = NULL;
    int pw = 0, ph = 0;
-@@ -2284,10 +2316,16 @@ static SDL_Renderer *g_renderer;
+@@ -2284,10 +2378,16 @@ static SDL_Renderer *g_renderer;
  static SDL_Texture *g_texture;
  static SDL_Rect g_sdl_renderer_rect;
  static SDL_Rect g_sdl_present_rect;
@@ -405,7 +467,7 @@ index 254dda5..178c6fa 100644
      fprintf(stderr, "Warning: Shaders are supported only with the OpenGL backend\n");
  
    /* SDL3 dropped the renderer flags argument (software vs accelerated is
-@@ -2367,16 +2405,35 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
+@@ -2367,16 +2467,58 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
                                     (void **)pixels, pitch)) {
      printf("Failed to lock texture: %s\n", SDL_GetError());
      *pixels = NULL;
@@ -441,10 +503,33 @@ index 254dda5..178c6fa 100644
 +    snesrecomp_sdl_render_texture(g_renderer, g_texture, &g_sdl_renderer_rect,
 +                                  &g_sdl_present_rect);
 +  }
++  {
++    /* A modal panel, over the shaded picture (see PresentTitleModal). */
++    static SDL_Texture *ov_tex;
++    static int ov_w, ov_h;
++    const uint32_t *ov = NULL;
++    int ow = 0, oh = 0;
++    if (snesrecomp_present_overlay(&ov, &ow, &oh) && ov) {
++      if (!ov_tex || ov_w != ow || ov_h != oh) {
++        if (ov_tex) SDL_DestroyTexture(ov_tex);
++        ov_tex = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888,
++                                   SDL_TEXTUREACCESS_STREAMING, ow, oh);
++        ov_w = ow;
++        ov_h = oh;
++      }
++      if (ov_tex) {
++        SDL_SetTextureBlendMode(ov_tex, SDL_BLENDMODE_BLEND);
++        snesrecomp_sdl_set_texture_linear(ov_tex, g_config.linear_filtering);
++        SDL_UpdateTexture(ov_tex, NULL, ov, ow * 4);
++        SDL_Rect src = {0, 0, ow, oh};
++        snesrecomp_sdl_render_texture(g_renderer, ov_tex, &src, &g_sdl_present_rect);
++      }
++    }
++  }
    SDL_RenderPresent(g_renderer);
  }
  
-@@ -2816,6 +2873,8 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
+@@ -2816,6 +2958,8 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
                                     : "Aspect ratio";
      gi->aspect_setting_help = game->aspect_setting_help;
    }
@@ -453,7 +538,7 @@ index 254dda5..178c6fa 100644
    /* Rewind rows. The runtime has always had the ring; without this the
     * player has no way to size it or switch it off. */
    gi->has_rewind_depth = game->rewind_settings ? 1 : 0;
-@@ -2895,6 +2954,8 @@ static void LauncherCommit(const RecompLauncherCSettings *ls, const char *config
+@@ -2895,6 +3039,8 @@ static void LauncherCommit(const RecompLauncherCSettings *ls, const char *config
                                             ? kSnesVSync_Adaptive
                                             : kSnesVSync_On;
    RendererApply(ls->renderer);   /* sets renderer + output_method */
@@ -462,7 +547,7 @@ index 254dda5..178c6fa 100644
  #if defined(SNES_HAS_LOBBY_CLIENT)
    /* The Netplay page persisted the name itself the moment it was
     * typed (snes_netplay_identity_store). g_config still holds what
-@@ -2999,12 +3060,65 @@ static const char *RestartReason(const Config *before, const char *rom,
+@@ -2999,12 +3145,65 @@ static const char *RestartReason(const Config *before, const char *rom,
    }
    return NULL;
  }
@@ -528,7 +613,7 @@ index 254dda5..178c6fa 100644
  static void RunInGameLauncher(bool *running, const char **exit_reason) {
  #if !defined(RECOMP_LAUNCHER)
    (void)running; (void)exit_reason;
-@@ -3917,6 +4031,17 @@ error_reading:;
+@@ -3917,6 +4116,17 @@ error_reading:;
  
      double event_profile_start = ProfileStart();
      while (SDL_PollEvent(&event)) {
@@ -546,7 +631,7 @@ index 254dda5..178c6fa 100644
        if (HandleDeviceEvent(&event))
          continue;
        switch (event.type) {
-@@ -3974,6 +4099,19 @@ error_reading:;
+@@ -3974,6 +4184,19 @@ error_reading:;
      }
  
      ProfileEnd(kProfileEvents, event_profile_start);
@@ -566,7 +651,7 @@ index 254dda5..178c6fa 100644
      if (g_paused != audiopaused) {
        audiopaused = g_paused;
        SetAudioPaused(audiopaused);
-@@ -4264,6 +4402,10 @@ error_reading:;
+@@ -4264,6 +4487,10 @@ error_reading:;
        if (!running) break;
        continue;   /* guest was frozen: no frame to run or present */
      }
@@ -661,7 +746,7 @@ index 03b6f06..35789fc 100644
  }
  #endif
 diff --git a/runner/src/desktop/opengl.c b/runner/src/desktop/opengl.c
-index e9063a7..7b9211e 100644
+index e9063a7..cd275b0 100644
 --- a/runner/src/desktop/opengl.c
 +++ b/runner/src/desktop/opengl.c
 @@ -39,6 +39,7 @@
@@ -672,7 +757,28 @@ index e9063a7..7b9211e 100644
  
  #define CODE(...) #__VA_ARGS__
  
-@@ -128,6 +129,65 @@ static void LoadShaderFromConfig(void) {
+@@ -46,7 +47,19 @@ static SDL_Window *g_window;
+ static uint8 *g_screen_buffer;
+ static size_t g_screen_buffer_size;
+ static int g_draw_width, g_draw_height;
+-static unsigned int g_program, g_flash_program, g_VAO;
++static unsigned int g_program, g_flash_program, g_VAO, g_VBO;
++
++/* GlslShader_Render re-points and disables attributes 0/1 of whichever VAO
++ * is bound (g_VAO), so restore the quad layout before drawing with it
++ * (fixes a black screen after switching a GLSL preset to Off). */
++static void RestoreQuadVAO(void) {
++  glBindVertexArray(g_VAO);
++  glBindBuffer(GL_ARRAY_BUFFER, g_VBO);
++  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
++  glEnableVertexAttribArray(0);
++  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
++  glEnableVertexAttribArray(1);
++}
+ static GlTextureWithSize g_texture;
+ static GlslShader *g_glsl_shader;
+ static bool g_want_screenshot;
+@@ -128,6 +141,65 @@ static void LoadShaderFromConfig(void) {
      g_glsl_shader = GlslShader_CreateFromFile(want);
  }
  
@@ -738,7 +844,15 @@ index e9063a7..7b9211e 100644
  static bool OpenGLRenderer_Init(SDL_Window *window) {
    g_window = window;
    g_context = SDL_GL_CreateContext(window);
-@@ -253,6 +313,7 @@ static bool OpenGLRenderer_Init(SDL_Window *window) {
+@@ -157,6 +229,7 @@ static bool OpenGLRenderer_Init(SDL_Window *window) {
+   // create a vertex buffer object
+   unsigned int vbo;
+   glGenBuffers(1, &vbo);
++  g_VBO = vbo;
+ 
+   // vertex array object
+   glGenVertexArrays(1, &g_VAO);
+@@ -253,6 +326,7 @@ static bool OpenGLRenderer_Init(SDL_Window *window) {
      printf("%s\n", infolog);
    }
  
@@ -746,7 +860,16 @@ index e9063a7..7b9211e 100644
    LoadShaderFromConfig();
  
    return true;
-@@ -402,7 +463,13 @@ static void OpenGLRenderer_EndDraw(void) {
+@@ -354,7 +428,7 @@ static bool DrawScreenshotFlash(double elapsed_seconds) {
+   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+   glUseProgram(g_flash_program);
+   glUniform4f(glGetUniformLocation(g_flash_program, "color"), 1.0f, 1.0f, 1.0f, alpha);
+-  glBindVertexArray(g_VAO);
++  RestoreQuadVAO();
+   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+   glDisable(GL_BLEND);
+   return true;
+@@ -402,19 +476,84 @@ static void OpenGLRenderer_EndDraw(void) {
    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
    glClear(GL_COLOR_BUFFER_BIT);
  
@@ -761,7 +884,79 @@ index e9063a7..7b9211e 100644
      glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
      glUseProgram(g_program);
      int filter = g_config.linear_filtering ? GL_LINEAR : GL_NEAREST;
-@@ -426,6 +493,9 @@ static void OpenGLRenderer_EndDraw(void) {
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+-    glBindVertexArray(g_VAO);
++    RestoreQuadVAO();
+     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+   } else {
+     GlslShader_Render(g_glsl_shader, &g_texture, viewport.x, viewport.y,
+                       viewport.width, viewport.height);
+   }
+ 
++  {
++    /* A modal panel, over the shaded picture (host PresentTitleModal). */
++    const uint32_t *ov = NULL;
++    int ow = 0, oh = 0;
++    if (snesrecomp_present_overlay(&ov, &ow, &oh) && ov) {
++      static GLuint ov_tex, ov_vao, ov_vbo;
++      static int ov_w, ov_h;
++      if (!ov_tex) glGenTextures(1, &ov_tex);
++      if (!ov_vao) {
++        /* Its own vertex array: a GLSL chain re-points and disables the
++         * attributes of whatever VAO is bound while it renders (g_VAO). */
++        static const float kOvVertices[] = {
++          -1.0f,  1.0f, 0.0f,   0.0f, 0.0f,
++          -1.0f, -1.0f, 0.0f,   0.0f, 1.0f,
++           1.0f,  1.0f, 0.0f,   1.0f, 0.0f,
++           1.0f, -1.0f, 0.0f,   1.0f, 1.0f,
++        };
++        glGenVertexArrays(1, &ov_vao);
++        glGenBuffers(1, &ov_vbo);
++        glBindVertexArray(ov_vao);
++        glBindBuffer(GL_ARRAY_BUFFER, ov_vbo);
++        glBufferData(GL_ARRAY_BUFFER, sizeof(kOvVertices), kOvVertices, GL_STATIC_DRAW);
++        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
++        glEnableVertexAttribArray(0);
++        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
++        glEnableVertexAttribArray(1);
++        glBindBuffer(GL_ARRAY_BUFFER, 0);
++        glBindVertexArray(g_VAO);
++      }
++      glActiveTexture(GL_TEXTURE0);
++      glBindTexture(GL_TEXTURE_2D, ov_tex);
++      if (ow != ov_w || oh != ov_h) {
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ow, oh, 0, GL_BGRA,
++                     GL_UNSIGNED_INT_8_8_8_8_REV, ov);
++        ov_w = ow;
++        ov_h = oh;
++      } else {
++        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, ow, oh, GL_BGRA,
++                        GL_UNSIGNED_INT_8_8_8_8_REV, ov);
++      }
++      int filter = g_config.linear_filtering ? GL_LINEAR : GL_NEAREST;
++      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
++      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
++      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++      glBindFramebuffer(GL_FRAMEBUFFER, 0);
++      glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
++      glEnable(GL_BLEND);
++      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
++      glUseProgram(g_program);
++      glUniform1i(glGetUniformLocation(g_program, "texture1"), 0);
++      glBindVertexArray(ov_vao);
++      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++      glBindVertexArray(g_VAO);
++      glDisable(GL_BLEND);
++      glBindTexture(GL_TEXTURE_2D, g_texture.gl_texture);
++    }
++  }
++
+   if (g_want_screenshot) {
+     g_want_screenshot = false;
+     SaveScreenshotBmp(drawable_width, drawable_height);
+@@ -426,6 +565,9 @@ static void OpenGLRenderer_EndDraw(void) {
        g_screenshot_flash_start_time = -1.0;
    }
  
@@ -772,10 +967,10 @@ index e9063a7..7b9211e 100644
  }
  
 diff --git a/runner/src/desktop/opengl.h b/runner/src/desktop/opengl.h
-index e7ed472..6bfb768 100644
+index e7ed472..ab6e4e1 100644
 --- a/runner/src/desktop/opengl.h
 +++ b/runner/src/desktop/opengl.h
-@@ -25,6 +25,25 @@ void snesrecomp_opengl_set_viewport(void (*compute)(int, int, int, int,
+@@ -25,6 +25,31 @@ void snesrecomp_opengl_set_viewport(void (*compute)(int, int, int, int,
  /* Capture the next fully composited OpenGL frame to screenshots/*.bmp. */
  void OpenGLRenderer_RequestScreenshot(void);
  
@@ -797,6 +992,12 @@ index e7ed472..6bfb768 100644
 +                                      int vx, int vy, int vw, int vh,
 +                                      int drawable_w, int drawable_h);
 +void OpenGLRenderer_SetPostHook(OpenGLRendererPostHook hook);
++
++/* Host-owned layer drawn OVER the post-shader picture at the frame viewport
++ * (straight-alpha ARGB8888, top row first); false when none is set. Used for
++ * modal menus, so the game behind them still goes through the shader. */
++#include <stdint.h>
++bool snesrecomp_present_overlay(const uint32_t **argb, int *w, int *h);
 +
  #ifdef __cplusplus
  }

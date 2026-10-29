@@ -5,7 +5,7 @@
 
 ## Play on Windows (no coding needed)
 
-1. Download `DemonsCrest-SNESRecomp-windows-x64-v1.0.2.zip` from this fork's
+1. Download `DemonsCrest-SNESRecomp-windows-x64-v1.0.3.zip` from this fork's
    [Releases](https://github.com/rac08241988/DemonsCrestSNESRecomp/releases)
    page and unzip it anywhere.
 2. Open `DemonsCrestSNESRecomp.exe`.
@@ -75,6 +75,31 @@ The project owner's PC:
 - Storage: M.2 NVMe SSD
 - OS: Windows and AtlasOS
 - Renderers tested: Vulkan and OpenGL
+
+## What's new in v1.0.3
+
+- **Shader preview works on the game behind the Options menu again.** In
+  v1.0.1 and v1.0.2, opening the Options menu (Esc / F12 / Guide) made the
+  shader apply only to the menu, while the game behind it went blocky and
+  unshaded until the menu closed. Now the shader is applied straight away to
+  the game image while the menu is open, so you can see what each preset
+  does as you pick it, on both OpenGL (`.glslp`) and Vulkan (`.slang`). The
+  menu is drawn crisp on top of the shaded picture.
+  This was a **regression from v1.0.1**. While the menu was open, the frozen
+  game frame was handed to the shader as a 2x blown-up copy with the menu
+  baked in, so the shader treated each 2x2 block as one pixel. v1.0.3 sends
+  the game frame through the shader at its real size and draws the menu
+  afterwards as a separate layer.
+- **Black screen when switching the shader back to Off: fixed.** It had the
+  same cause in the OpenGL renderer. After a GLSL preset ran, the plain
+  (no-shader) draw used a broken vertex layout. The layout is now restored
+  before drawing.
+- Controller handling is unchanged from v1.0.2.
+- **Known issues:**
+  - Vulkan slang shaders do not load on some real GPUs
+    ([issue #1](https://github.com/rac08241988/DemonsCrestSNESRecomp/issues/1));
+    use the OpenGL renderer for shaders meanwhile;
+  - in widescreen, the margins are dark in the stage-1 dragon arena.
 
 ## What's new in v1.0.2
 
