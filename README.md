@@ -64,6 +64,19 @@ Menu prompts follow the controller family and match buttons by position:
 the bottom face button (A on Xbox) confirms and loads, the right one (B) goes
 back, and the left one (X) saves.
 
+## Tested On
+
+The project owner's PC:
+
+| Part | Details |
+|---|---|
+| CPU | AMD Ryzen 7 5800X3D (8 cores / 16 threads, 96 MB 3D V-Cache) |
+| GPU | NVIDIA GeForce RTX 3070 Ti (8 GB GDDR6X) |
+| RAM | Dual-channel |
+| Storage | M.2 NVMe SSD |
+| OS | Windows (including AtlasOS) |
+| Renderers tested | Vulkan and OpenGL |
+
 ## What's new in v1.0.1
 
 - **Shader menu fixed.** Left/Right now cycles every preset and Enter applies

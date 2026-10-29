@@ -36,3 +36,7 @@ fi
 git -C "$SLANG_SRC" fetch --quiet origin "$SLANG_COMMIT" 2>/dev/null || git -C "$SLANG_SRC" fetch --quiet origin
 git -C "$SLANG_SRC" checkout --quiet "$SLANG_COMMIT"
 python3 "$ROOT/scripts/stage_slang_shaders.py" "$SLANG_SRC" "$DEST"
+
+# librashader's MPL-2.0 license beside the DLL (librashader.dll itself is
+# built from the v0.12.0 tag, see vendor/README.md, and copied into shaders/).
+cp "$ROOT/vendor/librashader/LICENSE.md" "$DEST/shaders/librashader-LICENSE.md"
