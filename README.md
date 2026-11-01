@@ -1,11 +1,14 @@
 # Demon's Crest Recompiled
 
-> This fork ships no game code, ROM data or game screenshots. The upstream
-> screenshots were removed on this branch.
+> **Shaders only work on the Vulkan and OpenGL renderers.**
+>
+> This fork ships no game code or ROM data. You supply your own cartridge dump.
+
+![Gameplay](docs/screenshots/gameplay.png)
 
 ## Play on Windows (no coding needed)
 
-1. Download `DemonsCrest-SNESRecomp-windows-x64-v1.0.3.zip` from this fork's
+1. Download `DemonsCrest-SNESRecomp-windows-x64-v1.1.0.zip` from this fork's
    [Releases](https://github.com/rac08241988/DemonsCrestSNESRecomp/releases)
    page and unzip it anywhere.
 2. Open `DemonsCrestSNESRecomp.exe`.
@@ -23,8 +26,9 @@ into `build\`; after that, opening the setup exe hands off to
 `build\DemonsCrestSNESRecomp.exe`. The zip root is flat with a single exe, so
 launchers such as Quiver Launcher pick it up automatically. Everything is built on your machine
 from your own cartridge dump. In game, press **F12** or **Escape** (or the
-pad **Guide** button) to open the Options menu, where you pick a CRT/RetroArch
-shader and the 120 Hz motion mode. Rewind is now **Shift+F12**.
+pad **Guide** button) to open the Options side panel, where you change every
+launcher setting, pick a CRT/RetroArch shader and the 120 Hz motion mode.
+Rewind is **Shift+F12**.
 
 > **Shaders work on Vulkan and OpenGL renderers only.** New configs default to
 > OpenGL. On another renderer (Direct3D, software) the Shader row says so
@@ -43,7 +47,9 @@ is the Xbox View/Back button, which is SNES Select.
 | SNES L / R | LB / RB | C / V |
 | Start / Select | Menu (Start) / View (Select) | Enter / Right Shift |
 | Options menu (pauses the game) | Guide | F12 or Esc |
-| Menu: move / change / accept / back | D-pad / Left-Right / A / B | Arrows / Left-Right / Enter or Space / Backspace |
+| Menu: move / change / accept / back | D-pad / Left-Right / A / B | Arrows / Left-Right / Enter or Space / Backspace or Esc |
+| Menu: previous / next tab | LB / RB | Q / E (or Tab, PgUp / PgDn) |
+| Menu: Apply | X or Start | F5 (or the Apply button) |
 | Save-state browser | hold View (Select) + press RB | F11 |
 | Save-state browser: load / save / back | B / Y / A | X / S / Esc or Backspace (1-9, 0, -, = pick a slot) |
 | Quick load / quick save slot 1-10 | - | F1-F10 / Shift+F1-F10 |
@@ -63,7 +69,9 @@ is the Xbox View/Back button, which is SNES Select.
 The save-state browser and rewind read the pad through `[GamepadMap]`, the
 same mapping as gameplay, so their on-screen A / B / X prompts are **SNES**
 buttons: SNES A = Xbox B, SNES B = Xbox A, SNES X = Xbox Y with the default
-map. (The Options menu uses Xbox A to accept and Xbox B to go back.)
+map. (The Options menu uses Xbox A to accept and Xbox B to go back. It reads
+the pad only while it is open; with the menu closed, gameplay input is exactly
+as in v1.0.3: fire = SNES Y = Xbox X, jump = SNES B = Xbox A.)
 
 ## Tested On
 
@@ -75,6 +83,60 @@ The project owner's PC:
 - Storage: M.2 NVMe SSD
 - OS: Windows and AtlasOS
 - Renderers tested: Vulkan and OpenGL
+
+## What's new in v1.1.0
+
+![Options panel, Video tab](docs/screenshots/options-video.png)
+![Shaders tab on Vulkan, CRT-Lottes previewing behind the panel](docs/screenshots/options-shaders-vulkan.png)
+
+- **New Options side panel.** A frosted panel on the right with the game
+  still visible beside it, tabs (Video, Display, Audio, Controls, Shaders,
+  System) and an **Apply** button (also pad X / Start, or F5). Every launcher
+  setting is in it: renderer, VSync, 120 Hz motion, widescreen, frame blend,
+  run-ahead, fullscreen, window scale, stretch, linear filtering, volume,
+  audio rate, P1/P2 controller, deadzone, save slot, save/load state,
+  skip launcher, resume on launch, reset and quit. Changes are kept pending
+  until you press Apply; shaders preview live behind the panel and are only
+  saved on Apply. The bottom hint bar shows Xbox or PlayStation glyphs to
+  match your controller, or keys when you use the keyboard.
+- **Background Input** (Controls tab, saved as `BackgroundInput` in
+  `config.ini` `[Controller]`). **Off by default:** when the window is not
+  focused the game ignores the controller and releases held buttons. Turn it
+  on to keep playing with the window in the background.
+- **Vulkan shaders (issue #1).** The Vulkan presenter now creates the
+  librashader chain on its own command buffer after the first frame, adds
+  the image usage librashader needs to read the frame, and writes
+  `build\librashader.log` plus `[dc] libra:` lines in the game log (set
+  `DC_VK_DEBUG=1` for more) so a failure says why.
+- **Save import.** When the setup builds the game, it looks for an earlier
+  Demon's Crest SNES Recomp install in the same parent folder (for example
+  an older unzipped release next to this one) and copies its saves and
+  settings in. It backs up anything already in `build\saves` to
+  `build\save-backups\<date-time>\` first, never replaces a save that is
+  newer than the imported one, and only copies `.ini` settings that this
+  install does not have yet. It runs once (`build\saves\.imported`) and logs
+  to `build\save-import.log`. To turn it off, put an empty file named
+  `no-save-import` beside the setup exe, or set `SNESRECOMP_NO_SAVE_IMPORT=1`.
+- **Uninstall.** `uninstall.bat` in the zip asks **"Delete save files?"**.
+  **No** removes the game but keeps `build\saves`, `build\save-backups` and
+  your settings so a new install can import them; **Yes** removes the whole
+  folder.
+
+## Where your saves are
+
+All inside the folder you unzipped:
+
+| File | What it is |
+|---|---|
+| `build\saves\save.srm` | The game's own battery save |
+| `build\saves\save0.sav` ... `save9.sav` | Save-state slots (F1-F10 / Shift+F1-F10, Options > System) |
+| `build\saves\resume.sav` | Restore point used when the game restarts itself to apply a setting (renderer, shader backend) |
+| `build\config.ini` | Video, audio, controller and key settings |
+| `build\dc_options.ini` | Shader and 120 Hz motion choices |
+| `build\save-backups\` | Backups made before a save import |
+
+Rebuilding from the setup exe never deletes `build\saves`. Copy that folder
+to keep your progress safe.
 
 ## What's new in v1.0.3
 

@@ -1,5 +1,5 @@
 diff --git a/host/snesrecomp_codegen_host.c b/host/snesrecomp_codegen_host.c
-index 13040e4..b061a05 100644
+index 13040e4..1fdd82d 100644
 --- a/host/snesrecomp_codegen_host.c
 +++ b/host/snesrecomp_codegen_host.c
 @@ -15,6 +15,7 @@
@@ -108,7 +108,7 @@ index 13040e4..b061a05 100644
      argv[argc++] = "--json-progress";
      argv[argc] = NULL;
  
-@@ -1165,6 +1219,234 @@ static int run_generate_posix(const char* rom,
+@@ -1165,6 +1219,233 @@ static int run_generate_posix(const char* rom,
  }
  #endif
  
@@ -269,7 +269,6 @@ index 13040e4..b061a05 100644
 +        if (strcmp(root, g_project_root) == 0) continue;
 +        if (!join_path(b, sizeof(b), root, "build") || !join_path(s, sizeof(s), b, "saves")) continue;
 +        if (!path_is_dir(s)) continue;
-+        /* Same game: the old build holds an exe with our name. */
 +        /* Same game: the old build holds an exe with our name, or the
 +         * uninstaller left the saves behind (KEPT_SAVES.txt). */
 +        char kept[1400];
@@ -343,7 +342,7 @@ index 13040e4..b061a05 100644
  static int host_prepare_generate(const char* source_path, char* out_path,
                                   size_t out_cap, char* err_msg, size_t err_cap,
                                   RecompLauncherCPrepareProgressFn on_progress,
-@@ -1184,6 +1466,7 @@ static int host_prepare_generate(const char* source_path, char* out_path,
+@@ -1184,6 +1465,7 @@ static int host_prepare_generate(const char* source_path, char* out_path,
              return 0;
          }
      }
@@ -351,7 +350,7 @@ index 13040e4..b061a05 100644
      step_log_open("snesrecomp generate");
      if (on_progress)
          on_progress(progress_ctx, 0.02f, "Starting snesrecomp generate…");
-@@ -1198,6 +1481,26 @@ static int host_prepare_generate(const char* source_path, char* out_path,
+@@ -1198,6 +1480,26 @@ static int host_prepare_generate(const char* source_path, char* out_path,
          return 0;
  #endif
  
@@ -378,7 +377,7 @@ index 13040e4..b061a05 100644
      snprintf(out_path, out_cap, "%s", source_path);
      if (on_progress)
          on_progress(progress_ctx, 1.0f, "Generate complete");
-@@ -1272,13 +1575,16 @@ static int write_windows_deferred_rebuild_helper(char* err_msg, size_t err_cap)
+@@ -1272,13 +1574,16 @@ static int write_windows_deferred_rebuild_helper(char* err_msg, size_t err_cap)
              "  )\r\n"
              ")\r\n"
              "echo Building...\r\n"
@@ -400,7 +399,7 @@ index 13040e4..b061a05 100644
              "  echo.\r\n"
              "  echo Build failed. Fix the errors above, then rebuild manually.\r\n"
              "  pause\r\n"
-@@ -1449,6 +1755,7 @@ static int host_rebuild_game(const char* rom_path, char* out_exe_path,
+@@ -1449,6 +1754,7 @@ static int host_rebuild_game(const char* rom_path, char* out_exe_path,
          snprintf(err_msg, err_cap, "Project tree is not available.");
          return 0;
      }
@@ -408,7 +407,7 @@ index 13040e4..b061a05 100644
      /* The wizard's toolchain page normally ran first; this is the fallback
       * for a skipped page or a cache pruned since -- fetch rather than fail. */
      char why[256];
-@@ -1802,7 +2109,7 @@ void snesrecomp_codegen_host_apply(RecompLauncherCGameInfo* gi,
+@@ -1802,7 +2108,7 @@ void snesrecomp_codegen_host_apply(RecompLauncherCGameInfo* gi,
  
      gi->prepare_with_progress = host_prepare_generate;
      gi->prepare_use_selected_rom = 1;
