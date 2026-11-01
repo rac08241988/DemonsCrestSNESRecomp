@@ -16,6 +16,8 @@ typedef enum DcLibraBackend {
 
 /* Installs the presenter hooks (idempotent). Call once the renderer exists. */
 void DcLibra_Install(void);
+/* Appends a line to librashader.log beside the exe (and stderr). */
+void DcLibra_Log(const char *fmt, ...);
 /* Which runtime the live renderer would use. */
 DcLibraBackend DcLibra_Backend(void);
 /* Whether librashader.dll could be loaded. */

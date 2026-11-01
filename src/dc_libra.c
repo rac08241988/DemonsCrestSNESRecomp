@@ -14,6 +14,7 @@
 #include <SDL3/SDL_vulkan.h>
 #endif
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,50 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
+
+/* --------------------------------------------------------------- logging */
+
+/* Shader diagnostics go to librashader.log beside the exe (truncated once per
+ * run) as well as stderr. A GUI build has no console, and the player's
+ * DemonsCrest.log mixes everything; this file is what an issue report needs. */
+static FILE *g_log;
+static bool g_log_tried;
+
+void DcLibra_Log(const char *fmt, ...) {
+  if (!g_log_tried) {
+    g_log_tried = true;
+    const char *base = SDL_GetBasePath();
+    char p[1200];
+    snprintf(p, sizeof(p), "%slibrashader.log", base ? base : "");
+    g_log = fopen(p, "w");
+    if (g_log) {
+      fprintf(g_log, "Demon's Crest SNESRecomp shader log (SDL %d.%d.%d)\n",
+              SDL_VERSIONNUM_MAJOR(SDL_GetVersion()), SDL_VERSIONNUM_MINOR(SDL_GetVersion()),
+              SDL_VERSIONNUM_MICRO(SDL_GetVersion()));
+    }
+  }
+  char line[1400];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(line, sizeof(line), fmt, ap);
+  va_end(ap);
+  fprintf(stderr, "[dc] %s\n", line);
+  if (g_log) {
+    fprintf(g_log, "[%8.3f] %s\n", (double)SDL_GetTicks() / 1000.0, line);
+    fflush(g_log);
+  }
+}
+
+/* DC_VK_DEBUG=1: ask SDL's Vulkan renderer for the Khronos validation layer
+ * (when installed, e.g. with the Vulkan SDK) and copy SDL's log, which is where
+ * SDL routes validation messages, into librashader.log. */
+static SDL_LogOutputFunction g_prev_log_fn;
+static void *g_prev_log_ud;
+static void SDLCALL dc_sdl_log(void *ud, int cat, SDL_LogPriority pri, const char *msg) {
+  (void)ud;
+  if (g_log) { fprintf(g_log, "[sdl %d/%d] %s\n", cat, (int)pri, msg); fflush(g_log); }
+  if (g_prev_log_fn) g_prev_log_fn(g_prev_log_ud, cat, pri, msg);
+}
 
 /* ---------------------------------------------------------------- loader */
 
@@ -45,15 +90,20 @@ static bool libra_load(void) {
     char p[1200];
     snprintf(p, sizeof(p), "%s%s", base, rel[i]);
     if (LoadLibraryA(p)) {
-      fprintf(stderr, "[dc] librashader: %s\n", p);
+      DcLibra_Log("librashader: loaded %s", p);
       break;
     }
+    DcLibra_Log("librashader: %s not loaded (Windows error %lu)", p,
+                (unsigned long)GetLastError());
   }
 #endif
   g_libra = librashader_load_instance();
   g_libra_state = g_libra.instance_loaded ? 1 : -1;
   if (g_libra_state < 0)
-    fprintf(stderr, "[dc] librashader not found: slang presets unavailable\n");
+    DcLibra_Log("librashader not found: slang presets unavailable");
+  else
+    DcLibra_Log("librashader API version %llu",
+                (unsigned long long)g_libra.instance_api_version());
   return g_libra_state > 0;
 }
 
@@ -67,8 +117,9 @@ static void libra_fail(const char *what, libra_error_t err) {
   } else {
     snprintf(g_outcome_msg, sizeof(g_outcome_msg), "%s", what);
   }
+  int code = err ? (int)g_libra.error_errno(err) : 0;
   if (err) g_libra.error_free(&err);
-  fprintf(stderr, "[dc] librashader: %s\n", g_outcome_msg);
+  DcLibra_Log("ERROR %s (librashader errno %d) preset=%s", g_outcome_msg, code, g_want);
   g_outcome = -1;
 }
 
@@ -279,6 +330,8 @@ static struct {
   PFN_vkGetInstanceProcAddr gipa;
   PFN_vkGetDeviceProcAddr gdpa;
   PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties;
+  PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties;
+  PFN_vkGetPhysicalDeviceFormatProperties GetPhysicalDeviceFormatProperties;
   PFN_vkGetDeviceQueue GetDeviceQueue;
   PFN_vkCreateCommandPool CreateCommandPool;
   PFN_vkAllocateCommandBuffers AllocateCommandBuffers;
@@ -345,15 +398,19 @@ static bool vk_init(SDL_Renderer *r) {
   vk.family = (uint32_t)SDL_GetNumberProperty(p, SDL_PROP_RENDERER_VULKAN_GRAPHICS_QUEUE_FAMILY_INDEX_NUMBER, 0);
   vk.gipa = (PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr();
   if (!vk.instance || !vk.phys || !vk.device || !vk.gipa) {
-    fprintf(stderr, "[dc] Vulkan renderer handles unavailable\n");
+    DcLibra_Log("Vulkan renderer handles unavailable (instance=%p phys=%p device=%p gipa=%p)",
+                (void *)vk.instance, (void *)vk.phys, (void *)vk.device, (void *)vk.gipa);
     return false;
   }
-#define I(f) vk.f = (PFN_vk##f)vk.gipa(vk.instance, "vk" #f); if (!vk.f) return false;
-  I(GetPhysicalDeviceMemoryProperties)
+#define I(f) vk.f = (PFN_vk##f)vk.gipa(vk.instance, "vk" #f); \
+  if (!vk.f) { DcLibra_Log("Vulkan: vk" #f " missing"); return false; }
+  I(GetPhysicalDeviceMemoryProperties) I(GetPhysicalDeviceProperties)
+  I(GetPhysicalDeviceFormatProperties)
   vk.gdpa = (PFN_vkGetDeviceProcAddr)vk.gipa(vk.instance, "vkGetDeviceProcAddr");
   if (!vk.gdpa) return false;
 #undef I
-#define D(f) vk.f = (PFN_vk##f)vk.gdpa(vk.device, "vk" #f); if (!vk.f) return false;
+#define D(f) vk.f = (PFN_vk##f)vk.gdpa(vk.device, "vk" #f); \
+  if (!vk.f) { DcLibra_Log("Vulkan: vk" #f " missing"); return false; }
   D(GetDeviceQueue) D(CreateCommandPool) D(AllocateCommandBuffers) D(BeginCommandBuffer)
   D(EndCommandBuffer) D(ResetCommandBuffer) D(QueueSubmit) D(QueueWaitIdle) D(CreateFence)
   D(WaitForFences) D(ResetFences) D(CreateBuffer) D(DestroyBuffer)
@@ -362,6 +419,20 @@ static bool vk_init(SDL_Renderer *r) {
   D(BindImageMemory) D(CmdPipelineBarrier) D(CmdCopyBufferToImage)
 #undef D
   vk.GetPhysicalDeviceMemoryProperties(vk.phys, &vk.mem);
+  {
+    VkPhysicalDeviceProperties pp;
+    memset(&pp, 0, sizeof(pp));
+    vk.GetPhysicalDeviceProperties(vk.phys, &pp);
+    VkFormatProperties fp;
+    memset(&fp, 0, sizeof(fp));
+    vk.GetPhysicalDeviceFormatProperties(vk.phys, VK_FORMAT_B8G8R8A8_UNORM, &fp);
+    DcLibra_Log("Vulkan device: %s (vendor 0x%04x device 0x%04x, driver 0x%08x, API %u.%u.%u), "
+                "graphics queue family %u, BGRA8 optimal features 0x%x",
+                pp.deviceName, pp.vendorID, pp.deviceID, pp.driverVersion,
+                VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion),
+                VK_API_VERSION_PATCH(pp.apiVersion), vk.family,
+                (unsigned)fp.optimalTilingFeatures);
+  }
   vk.GetDeviceQueue(vk.device, vk.family, 0, &vk.queue);
   VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
   pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -375,7 +446,7 @@ static bool vk_init(SDL_Renderer *r) {
   VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
   if (vk.CreateFence(vk.device, &fci, NULL, &vk.fence) != VK_SUCCESS) return false;
   vk.ok = true;
-  fprintf(stderr, "[dc] Vulkan shader path ready (queue family %u)\n", vk.family);
+  DcLibra_Log("Vulkan shader path ready");
   return true;
 }
 
@@ -452,9 +523,15 @@ static bool vk_inputs(int w, int h) {
       vk.FreeMemory(vk.device, vk.in_mem, NULL);
       vk.in_img = VK_NULL_HANDLE;
     }
-    if (!vk_image(w, h, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                  &vk.in_img, &vk.in_mem))
+    /* TRANSFER_SRC: presets that read OriginalHistory make librashader
+     * vkCmdCopyImage out of the input every frame. Without the bit that copy
+     * is undefined behaviour: harmless on lavapipe, not on real drivers. */
+    if (!vk_image(w, h, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                  &vk.in_img, &vk.in_mem)) {
+      DcLibra_Log("Vulkan: creating the %dx%d input image failed", w, h);
       return false;
+    }
     vk.in_w = w;
     vk.in_h = h;
     vk.in_layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -472,8 +549,10 @@ static bool vk_output(int w, int h) {
   }
   if (!vk_image(w, h, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                &vk.out_img, &vk.out_mem))
+                &vk.out_img, &vk.out_mem)) {
+    DcLibra_Log("Vulkan: creating the %dx%d output image failed", w, h);
     return false;
+  }
   /* SDL samples it in SHADER_READ_ONLY_OPTIMAL; put it there before the
    * texture exists so SDL's assumption holds from the first use. */
   VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -499,7 +578,7 @@ static bool vk_output(int w, int h) {
   vk.out_tex = SDL_CreateTextureWithProperties(vk.renderer, p);
   SDL_DestroyProperties(p);
   if (!vk.out_tex) {
-    fprintf(stderr, "[dc] Vulkan: wrapping the shader output failed: %s\n", SDL_GetError());
+    DcLibra_Log("Vulkan: wrapping the shader output failed: %s", SDL_GetError());
     return false;
   }
   SDL_SetTextureBlendMode(vk.out_tex, SDL_BLENDMODE_NONE);
@@ -547,8 +626,37 @@ static bool vk_hook(SDL_Renderer *r, const void *pixels, int pitch, int w, int h
     memset(&opt, 0, sizeof(opt));
     opt.version = LIBRASHADER_CURRENT_VERSION;
     opt.frames_in_flight = 2;
-    libra_error_t err = g_libra.vk_filter_chain_create(&preset, dev, &opt, &vk.chain);
+    /* Deferred creation records the chain's uploads (LUTs, history clears)
+     * into our command buffer, allocated from the renderer's graphics queue
+     * family. The non-deferred call builds its own pool with queue family
+     * index 0 and submits it to SDL's queue, which is only valid when SDL's
+     * queue happens to be family 0. */
+    DcLibra_Log("Vulkan: creating filter chain for %s", g_want);
+    VkCommandBufferBeginInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vk.ResetCommandBuffer(vk.cb[0], 0);
+    vk.BeginCommandBuffer(vk.cb[0], &cbi);
+    libra_error_t err = g_libra.vk_filter_chain_create_deferred(&preset, dev, vk.cb[0], &opt,
+                                                                 &vk.chain);
+    vk.EndCommandBuffer(vk.cb[0]);
     if (preset) g_libra.preset_free(&preset);
+    if (!err) {
+      VkSubmitInfo csi = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+      csi.commandBufferCount = 1;
+      csi.pCommandBuffers = &vk.cb[0];
+      vk.ResetFences(vk.device, 1, &vk.fence);
+      VkResult cr = vk.QueueSubmit(vk.queue, 1, &csi, vk.fence);
+      if (cr == VK_SUCCESS) cr = vk.WaitForFences(vk.device, 1, &vk.fence, VK_TRUE, UINT64_MAX);
+      if (cr != VK_SUCCESS) {
+        DcLibra_Log("Vulkan: submitting the chain's setup failed (VkResult %d)", (int)cr);
+        g_libra.vk_filter_chain_free(&vk.chain);
+        vk.chain = NULL;
+        snprintf(g_outcome_msg, sizeof(g_outcome_msg), "Vulkan setup submit failed (%d)", (int)cr);
+        g_outcome = -1;
+        vk.loaded[0] = g_want[0] = 0;
+        return false;
+      }
+    }
     if (err) {
       vk.chain = NULL;
       libra_fail("Vulkan chain", err);
@@ -557,12 +665,21 @@ static bool vk_hook(SDL_Renderer *r, const void *pixels, int pitch, int w, int h
     }
     g_frame_count = 0;
     snprintf(g_outcome_msg, sizeof(g_outcome_msg), "running (Vulkan)");
+    DcLibra_Log("Vulkan: filter chain running");
     g_outcome = 1;
   }
   if (w <= 0 || h <= 0 || pw <= 0 || ph <= 0) return false;
   /* SDL's own work from the previous frame may still read the output. */
   vk.QueueWaitIdle(vk.queue);
-  if (!vk_inputs(w, h) || !vk_output(pw, ph)) return false;
+  if (!vk_inputs(w, h) || !vk_output(pw, ph)) {
+    DcLibra_Log("Vulkan: image setup failed; shader disabled");
+    snprintf(g_outcome_msg, sizeof(g_outcome_msg), "Vulkan image setup failed");
+    g_outcome = -1;
+    g_libra.vk_filter_chain_free(&vk.chain);
+    vk.chain = NULL;
+    vk.loaded[0] = g_want[0] = 0;
+    return false;
+  }
   for (int y = 0; y < h; y++) {
     const uint32_t *src = (const uint32_t *)((const uint8_t *)pixels + (size_t)y * pitch);
     uint32_t *dst = (uint32_t *)vk.stage_map + (size_t)y * w;
@@ -613,9 +730,14 @@ static bool vk_hook(SDL_Renderer *r, const void *pixels, int pitch, int w, int h
   si.pCommandBuffers = vk.cb;
   vk.ResetFences(vk.device, 1, &vk.fence);
   VkResult vr = vk.QueueSubmit(vk.queue, 1, &si, vk.fence);
-  if (vr == VK_SUCCESS) vk.WaitForFences(vk.device, 1, &vk.fence, VK_TRUE, UINT64_MAX);
+  if (vr == VK_SUCCESS) vr = vk.WaitForFences(vk.device, 1, &vk.fence, VK_TRUE, UINT64_MAX);
   if (err || vr != VK_SUCCESS) {
     if (err) libra_fail("Vulkan frame", err);
+    if (vr != VK_SUCCESS) {
+      DcLibra_Log("Vulkan: frame submit failed (VkResult %d)", (int)vr);
+      snprintf(g_outcome_msg, sizeof(g_outcome_msg), "Vulkan frame submit failed (%d)", (int)vr);
+      g_outcome = -1;
+    }
     vk.QueueWaitIdle(vk.queue);
     g_libra.vk_filter_chain_free(&vk.chain);
     vk.chain = NULL;
@@ -633,6 +755,13 @@ void DcLibra_Install(void) {
   static bool done;
   if (done) return;
   done = true;
+  const char *dbg = getenv("DC_VK_DEBUG");
+  if (dbg && dbg[0] && dbg[0] != '0') {
+    SDL_SetHint(SDL_HINT_RENDER_VULKAN_DEBUG, "1");
+    DcLibra_Log("DC_VK_DEBUG: requesting Vulkan validation from SDL");
+    SDL_GetLogOutputFunction(&g_prev_log_fn, &g_prev_log_ud);
+    SDL_SetLogOutputFunction(dc_sdl_log, NULL);
+  }
   OpenGLRenderer_SetPostHook(gl_hook);
 #if SNESRECOMP_SDL3
   snesrecomp_sdl_set_present_hook(vk_hook);
@@ -644,6 +773,11 @@ DcLibraBackend DcLibra_Backend(void) {
 #if SNESRECOMP_SDL3
   SDL_Renderer *r = snesrecomp_sdl_active_renderer();
   const char *name = r ? SDL_GetRendererName(r) : NULL;
+  static const char *logged;
+  if (name != logged) {
+    logged = name;
+    DcLibra_Log("presenter: SDL renderer '%s'", name ? name : "(none)");
+  }
   if (name && strcmp(name, "vulkan") == 0) return DC_LIBRA_VULKAN;
 #endif
   return DC_LIBRA_NONE;

@@ -129,6 +129,7 @@ static const SnesDesktopHostGame kGameHost = {
     .on_gamepad_button   = DcOptions_OnGamepadButton,
     .modal_active        = DcOptions_ModalActive,
     .draw_modal          = DcOptions_DrawModal,
+    .draw_modal_layer    = DcOptions_DrawModalLayer,
     /* 120 Hz motion: decouple presentation on 100 Hz+ displays and compose
      * in-between frames (game logic stays at 60 Hz). */
     .presentation_hz     = DcInterp_PresentationHz,

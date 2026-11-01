@@ -53,6 +53,7 @@ add_executable(DemonsCrestSNESRecomp
     # librashader (loaded at runtime, never linked): libretro slang presets on
     # the OpenGL presenter and on SDL's Vulkan renderer.
     src/dc_libra.c
+    src/ui/rpanel.c
     src/dc_interp.c
     src/dc_default_config.c
 )

@@ -23,6 +23,9 @@ int DcOptions_OnKey(int key, int mod, int pressed, int repeat);
 int DcOptions_OnGamepadButton(int sdl_button, int pressed);
 int DcOptions_ModalActive(void);
 void DcOptions_DrawModal(uint8_t *dst, size_t pitch, int w, int h);
+struct SnesModalLayerView;
+struct SnesModalLayer;
+int DcOptions_DrawModalLayer(const struct SnesModalLayerView *v, struct SnesModalLayer *out);
 /* Once per simulated frame (test hooks). */
 void DcOptions_OnSimFrame(unsigned number);
 /* src/dc_default_config.c */

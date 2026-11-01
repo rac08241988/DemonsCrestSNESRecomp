@@ -1,8 +1,16 @@
 diff --git a/host/snesrecomp_codegen_host.c b/host/snesrecomp_codegen_host.c
-index 13040e4..cebbb76 100644
+index 13040e4..b061a05 100644
 --- a/host/snesrecomp_codegen_host.c
 +++ b/host/snesrecomp_codegen_host.c
-@@ -496,6 +496,14 @@ static int collect_cache_bases(char bases[][1400], int max_n) {
+@@ -15,6 +15,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <time.h>
+ 
+ #if defined(_WIN32)
+ #  include <windows.h>
+@@ -496,6 +497,14 @@ static int collect_cache_bases(char bases[][1400], int max_n) {
      const char* cache = getenv("RETCOMM_TOOLCHAIN_CACHE");
      if (cache && cache[0] && n < max_n)
          snprintf(bases[n++], 1400, "%s", cache);
@@ -17,7 +25,7 @@ index 13040e4..cebbb76 100644
      const char* data = getenv("RETCOMM_DATA_HOME");
      if (data && data[0] && n < max_n &&
          join_path(bases[n], 1400, data, "toolchains/" SNESRECOMP_TC_PACK))
-@@ -972,19 +980,59 @@ static void handle_progress_line(const char* line,
+@@ -972,19 +981,59 @@ static void handle_progress_line(const char* line,
      }
  }
  
@@ -79,7 +87,7 @@ index 13040e4..cebbb76 100644
  
      if (g_has_funcs_h) {
          snprintf(cmdline, sizeof(cmdline),
-@@ -1022,7 +1070,7 @@ static int run_generate_win(const char* rom,
+@@ -1022,7 +1071,7 @@ static int run_generate_win(const char* rom,
      si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
      si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
  
@@ -88,7 +96,7 @@ index 13040e4..cebbb76 100644
      snprintf(mutable_cmd, sizeof(mutable_cmd), "%s", cmdline);
      if (!CreateProcessA(NULL, mutable_cmd, NULL, NULL, TRUE, 0, NULL,
                          g_project_root, &si, &pi)) {
-@@ -1112,6 +1160,11 @@ static int run_generate_posix(const char* rom,
+@@ -1112,6 +1161,11 @@ static int run_generate_posix(const char* rom,
          argv[argc++] = "--expected-sha256";
          argv[argc++] = (char*)g_cfg->expected_sha256;
      }
@@ -100,7 +108,250 @@ index 13040e4..cebbb76 100644
      argv[argc++] = "--json-progress";
      argv[argc] = NULL;
  
-@@ -1198,6 +1251,26 @@ static int host_prepare_generate(const char* source_path, char* out_path,
+@@ -1165,6 +1219,234 @@ static int run_generate_posix(const char* rom,
+ }
+ #endif
+ 
++
++/* ---- save import (shaders-120hz fork) ------------------------------------
++ * A new release usually lands in a new folder next to the old one (a fresh
++ * unzip, or Quiver's Apps/<name>/ beside a manual install). Before the first
++ * build, copy the battery save (saves/save.srm), the save-state slots
++ * (saves/save*.sav) and the settings (build/*.ini) from the most recent
++ * earlier install among the sibling folders. Rules:
++ *   - default on; a file named `no-save-import` beside the setup exe, or
++ *     SNESRECOMP_NO_SAVE_IMPORT=1, turns it off;
++ *   - runs once per install (marker build/saves/.imported);
++ *   - anything already in build/saves is first copied to
++ *     build/save-backups/<YYYYmmdd-HHMMSS>/;
++ *   - a file is never replaced by an older one; settings are only copied
++ *     when this install has none yet. */
++typedef struct { char path[1400]; long long mtime; } ImpFile;
++
++static long long file_mtime(const char* p) {
++#if defined(_WIN32)
++    WIN32_FILE_ATTRIBUTE_DATA a;
++    if (!GetFileAttributesExA(p, GetFileExInfoStandard, &a)) return -1;
++    return ((long long)a.ftLastWriteTime.dwHighDateTime << 32) | a.ftLastWriteTime.dwLowDateTime;
++#else
++    struct stat st;
++    if (stat(p, &st) != 0) return -1;
++    return (long long)st.st_mtime * 10000000LL;
++#endif
++}
++
++static int copy_file_keep_time(const char* src, const char* dst) {
++#if defined(_WIN32)
++    return CopyFileA(src, dst, FALSE) ? 1 : 0;
++#else
++    FILE* in = fopen(src, "rb");
++    if (!in) return 0;
++    FILE* out = fopen(dst, "wb");
++    if (!out) { fclose(in); return 0; }
++    char buf[65536];
++    size_t n;
++    int ok = 1;
++    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
++        if (fwrite(buf, 1, n, out) != n) { ok = 0; break; }
++    fclose(in);
++    if (fclose(out) != 0) ok = 0;
++    return ok;
++#endif
++}
++
++/* List plain files in dir whose names match: ext list like ".srm|.sav|.ini" */
++static int list_files(const char* dir, const char* exts, char names[][260], int max) {
++    int n = 0;
++#if defined(_WIN32)
++    char pat[1500];
++    snprintf(pat, sizeof(pat), "%s\\*", dir);
++    WIN32_FIND_DATAA fd;
++    HANDLE h = FindFirstFileA(pat, &fd);
++    if (h == INVALID_HANDLE_VALUE) return 0;
++    do {
++        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
++        const char* nm = fd.cFileName;
++#else
++    DIR* d = opendir(dir);
++    if (!d) return 0;
++    struct dirent* e;
++    while ((e = readdir(d))) {
++        const char* nm = e->d_name;
++        char full[1500];
++        snprintf(full, sizeof(full), "%s/%s", dir, nm);
++        if (!path_is_file(full)) continue;
++#endif
++        const char* dot = strrchr(nm, '.');
++        if (dot && n < max) {
++            char want[16];
++            snprintf(want, sizeof(want), "%s|", dot);
++            char hay[64];
++            snprintf(hay, sizeof(hay), "%s|", exts);
++            for (char* c = want; *c; c++) *c = (char)tolower((unsigned char)*c);
++            if (strstr(hay, want) && strcmp(nm, "resume.sav") != 0)
++                snprintf(names[n++], 260, "%s", nm);
++        }
++#if defined(_WIN32)
++    } while (FindNextFileA(h, &fd));
++    FindClose(h);
++#else
++    }
++    closedir(d);
++#endif
++    return n;
++}
++
++static void import_log(const char* fmt, const char* a, const char* b) {
++    char line[1600];
++    snprintf(line, sizeof(line), fmt, a ? a : "", b ? b : "");
++    fprintf(stderr, "[setup] save import: %s\n", line);
++    if (g_build_dir[0]) {
++        char p[1300];
++        if (join_path(p, sizeof(p), g_build_dir, "save-import.log")) {
++            FILE* f = fopen(p, "a");
++            if (f) { fprintf(f, "%s\n", line); fclose(f); }
++        }
++    }
++}
++
++static void import_previous_saves(void) {
++    static int done;
++    if (done) return;
++    done = 1;
++    const char* off = getenv("SNESRECOMP_NO_SAVE_IMPORT");
++    if (off && off[0] && off[0] != '0') return;
++    char p[1400], q[1400];
++    if (!g_build_dir[0] || !g_project_root[0]) return;
++    if (join_path(p, sizeof(p), g_project_root, "no-save-import") && path_is_file(p)) return;
++    char my_saves[1400], marker[1400];
++    if (!join_path(my_saves, sizeof(my_saves), g_build_dir, "saves")) return;
++    if (!join_path(marker, sizeof(marker), my_saves, ".imported")) return;
++    if (path_is_file(marker)) return;
++
++    /* Candidates: <parent of the install>/<sibling>/build/saves */
++    char parent[1100];
++    if (!dirname_copy(parent, sizeof(parent), g_project_root)) return;
++    char sibs[64][260];
++    int ns = 0;
++#if defined(_WIN32)
++    {
++        char pat[1200];
++        snprintf(pat, sizeof(pat), "%s\\*", parent);
++        WIN32_FIND_DATAA fd;
++        HANDLE h = FindFirstFileA(pat, &fd);
++        if (h != INVALID_HANDLE_VALUE) {
++            do {
++                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.' && ns < 64)
++                    snprintf(sibs[ns++], 260, "%s", fd.cFileName);
++            } while (FindNextFileA(h, &fd));
++            FindClose(h);
++        }
++    }
++#else
++    {
++        DIR* d = opendir(parent);
++        struct dirent* e;
++        while (d && (e = readdir(d)))
++            if (e->d_name[0] != '.' && ns < 64) snprintf(sibs[ns++], 260, "%s", e->d_name);
++        if (d) closedir(d);
++    }
++#endif
++    /* g_exe_path = <build>/<game exe>: its file name is the game's. */
++    const char* exe = strrchr(g_exe_path, '/');
++    const char* exe2 = strrchr(g_exe_path, '\\');
++    if (!exe || (exe2 && exe2 > exe)) exe = exe2;
++    exe = exe ? exe + 1 : g_exe_path;
++    char best[1400] = "";
++    long long best_t = -1;
++    for (int i = 0; i < ns; i++) {
++        char root[1400], b[1400], s[1400], gexe[1400];
++        if (!join_path(root, sizeof(root), parent, sibs[i])) continue;
++        if (strcmp(root, g_project_root) == 0) continue;
++        if (!join_path(b, sizeof(b), root, "build") || !join_path(s, sizeof(s), b, "saves")) continue;
++        if (!path_is_dir(s)) continue;
++        /* Same game: the old build holds an exe with our name. */
++        /* Same game: the old build holds an exe with our name, or the
++         * uninstaller left the saves behind (KEPT_SAVES.txt). */
++        char kept[1400];
++        if (exe && exe[0] && join_path(gexe, sizeof(gexe), b, exe) && !path_is_file(gexe) &&
++            !(join_path(kept, sizeof(kept), b, "KEPT_SAVES.txt") && path_is_file(kept)))
++            continue;
++        char names[64][260];
++        int n = list_files(s, ".srm|.sav", names, 64);
++        long long t = -1;
++        for (int k = 0; k < n; k++) {
++            char f[1700];
++            snprintf(f, sizeof(f), "%s/%s", s, names[k]);
++            long long m = file_mtime(f);
++            if (m > t) t = m;
++        }
++        if (n > 0 && t > best_t) { best_t = t; snprintf(best, sizeof(best), "%s", b); }
++    }
++    mkdir_p(my_saves);
++    if (!best[0]) {
++        FILE* f = fopen(marker, "w");
++        if (f) { fputs("no earlier install found\n", f); fclose(f); }
++        return;
++    }
++    import_log("importing from %s%s", best, "");
++
++    /* Backup whatever this install already has. */
++    char names[64][260];
++    int have = list_files(my_saves, ".srm|.sav", names, 64);
++    if (have > 0) {
++        char stamp[32];
++#if defined(_WIN32)
++        SYSTEMTIME st;
++        GetLocalTime(&st);
++        snprintf(stamp, sizeof(stamp), "%04d%02d%02d-%02d%02d%02d", st.wYear, st.wMonth, st.wDay,
++                 st.wHour, st.wMinute, st.wSecond);
++#else
++        snprintf(stamp, sizeof(stamp), "%ld", (long)time(NULL));
++#endif
++        char bdir[1400];
++        snprintf(bdir, sizeof(bdir), "%s/save-backups/%s", g_build_dir, stamp);
++        mkdir_p(bdir);
++        for (int k = 0; k < have; k++) {
++            snprintf(p, sizeof(p), "%s/%s", my_saves, names[k]);
++            snprintf(q, sizeof(q), "%s/%s", bdir, names[k]);
++            copy_file_keep_time(p, q);
++        }
++        import_log("backed up %s existing save files to %s", "this install's", bdir);
++    }
++
++    char src_saves[1400];
++    join_path(src_saves, sizeof(src_saves), best, "saves");
++    int n = list_files(src_saves, ".srm|.sav", names, 64);
++    for (int k = 0; k < n; k++) {
++        snprintf(p, sizeof(p), "%s/%s", src_saves, names[k]);
++        snprintf(q, sizeof(q), "%s/%s", my_saves, names[k]);
++        long long ts = file_mtime(p), td = file_mtime(q);
++        if (td >= 0 && td >= ts) { import_log("kept %s (this install's copy is newer)%s", names[k], ""); continue; }
++        if (copy_file_keep_time(p, q)) import_log("copied %s%s", names[k], "");
++    }
++    n = list_files(best, ".ini", names, 64);
++    for (int k = 0; k < n; k++) {
++        snprintf(p, sizeof(p), "%s/%s", best, names[k]);
++        snprintf(q, sizeof(q), "%s/%s", g_build_dir, names[k]);
++        if (path_is_file(q)) continue;
++        if (copy_file_keep_time(p, q)) import_log("copied settings %s%s", names[k], "");
++    }
++    FILE* f = fopen(marker, "w");
++    if (f) { fprintf(f, "imported from %s\n", best); fclose(f); }
++}
++
+ static int host_prepare_generate(const char* source_path, char* out_path,
+                                  size_t out_cap, char* err_msg, size_t err_cap,
+                                  RecompLauncherCPrepareProgressFn on_progress,
+@@ -1184,6 +1466,7 @@ static int host_prepare_generate(const char* source_path, char* out_path,
+             return 0;
+         }
+     }
++    import_previous_saves();
+     step_log_open("snesrecomp generate");
+     if (on_progress)
+         on_progress(progress_ctx, 0.02f, "Starting snesrecomp generate…");
+@@ -1198,6 +1481,26 @@ static int host_prepare_generate(const char* source_path, char* out_path,
          return 0;
  #endif
  
@@ -127,7 +378,7 @@ index 13040e4..cebbb76 100644
      snprintf(out_path, out_cap, "%s", source_path);
      if (on_progress)
          on_progress(progress_ctx, 1.0f, "Generate complete");
-@@ -1272,13 +1345,16 @@ static int write_windows_deferred_rebuild_helper(char* err_msg, size_t err_cap)
+@@ -1272,13 +1575,16 @@ static int write_windows_deferred_rebuild_helper(char* err_msg, size_t err_cap)
              "  )\r\n"
              ")\r\n"
              "echo Building...\r\n"
@@ -149,7 +400,15 @@ index 13040e4..cebbb76 100644
              "  echo.\r\n"
              "  echo Build failed. Fix the errors above, then rebuild manually.\r\n"
              "  pause\r\n"
-@@ -1802,7 +1878,7 @@ void snesrecomp_codegen_host_apply(RecompLauncherCGameInfo* gi,
+@@ -1449,6 +1755,7 @@ static int host_rebuild_game(const char* rom_path, char* out_exe_path,
+         snprintf(err_msg, err_cap, "Project tree is not available.");
+         return 0;
+     }
++    import_previous_saves();
+     /* The wizard's toolchain page normally ran first; this is the fallback
+      * for a skipped page or a cache pruned since -- fetch rather than fail. */
+     char why[256];
+@@ -1802,7 +2109,7 @@ void snesrecomp_codegen_host_apply(RecompLauncherCGameInfo* gi,
  
      gi->prepare_with_progress = host_prepare_generate;
      gi->prepare_use_selected_rom = 1;
@@ -158,6 +417,20 @@ index 13040e4..cebbb76 100644
      gi->prepare_busy_status = "Generating sources…";
      gi->prepare_success_status = "Sources ready — building…";
  
+diff --git a/runner/src/desktop/config.h b/runner/src/desktop/config.h
+index 3bd47d1..f75a6b0 100644
+--- a/runner/src/desktop/config.h
++++ b/runner/src/desktop/config.h
+@@ -167,6 +167,9 @@ typedef struct Config {
+    * keyboard player sharing one keyboard has to be asked for. */
+   int player_src[2];
+   int gamepad_deadzone;
++  /* [Controller] BackgroundInput: false (default) ignores controller input
++   * while the window does not have focus. */
++  bool background_input;
+ 
+   // Which players have keyboard controls
+   uint8 has_keyboard_controls;
 diff --git a/runner/src/desktop/glsl_shader.c b/runner/src/desktop/glsl_shader.c
 index 54f2464..8a5df82 100644
 --- a/runner/src/desktop/glsl_shader.c
@@ -331,7 +604,7 @@ index f4adb2f..efbafdf 100644
  
  typedef struct GlslShader {
 diff --git a/runner/src/desktop/host_main.c b/runner/src/desktop/host_main.c
-index 254dda5..7a3654e 100644
+index 254dda5..2d24ceb 100644
 --- a/runner/src/desktop/host_main.c
 +++ b/runner/src/desktop/host_main.c
 @@ -18,6 +18,7 @@
@@ -358,7 +631,7 @@ index 254dda5..7a3654e 100644
  static uint64_t g_state_generation;
  
  /* The last field actually presented, kept so an overlay can freeze the guest
-@@ -1932,6 +1942,90 @@ static void OverlaySelftestPadTick(unsigned pump) {
+@@ -1932,6 +1942,128 @@ static void OverlaySelftestPadTick(unsigned pump) {
   * shapes: the save-state browser is an opaque full-rect panel, the rewind
   * filmstrip belongs across the bottom third of the frame, annotating the
   * moment it describes. */
@@ -372,6 +645,16 @@ index 254dda5..7a3654e 100644
 +  *argb = g_present_overlay;
 +  *w = g_present_overlay_w;
 +  *h = g_present_overlay_h;
++  return true;
++}
++
++static const uint32_t *g_present_layer;
++static int g_present_layer_x, g_present_layer_y, g_present_layer_w, g_present_layer_h;
++bool snesrecomp_present_layer(const uint32_t **argb, int *x, int *y, int *w, int *h) {
++  if (!g_present_layer) return false;
++  *argb = g_present_layer;
++  *x = g_present_layer_x; *y = g_present_layer_y;
++  *w = g_present_layer_w; *h = g_present_layer_h;
 +  return true;
 +}
 +
@@ -396,8 +679,30 @@ index 254dda5..7a3654e 100644
 +    ov_white = (uint32_t *)malloc(n * 4);
 +    ov_cap = (ov_black && ov_white) ? n : 0;
 +  }
-+  bool have_ov = false;
-+  if (ov_cap && g_game->draw_modal) {
++  bool have_ov = false, have_layer = false;
++  SnesModalLayer layer = {0};
++  if (g_game->draw_modal_layer) {
++    SnesModalLayerView view = {0};
++    if (g_renderer_funcs.GetOutputSize)
++      g_renderer_funcs.GetOutputSize(&view.out_w, &view.out_h);
++    if (view.out_w > 0 && view.out_h > 0) {
++      SnesDisplayViewport vp;
++      SnesDisplayAspect_ComputeViewport(base_w, base_h, view.out_w, view.out_h,
++                                        SnesDisplayAspect_Clamp(g_config.display_aspect),
++                                        g_config.ignore_aspect_ratio, false, &vp);
++      if (g_game->compute_viewport)
++        g_game->compute_viewport(base_w, base_h, view.out_w, view.out_h, &vp);
++      view.vp_x = vp.x; view.vp_y = vp.y; view.vp_w = vp.width; view.vp_h = vp.height;
++      if (g_frozen_w > 0 && g_frozen_h > 0) {
++        view.frame = (const uint32_t *)g_frozen_frame;
++        view.frame_w = g_frozen_w;
++        view.frame_h = g_frozen_h;
++      }
++      have_layer = g_game->draw_modal_layer(&view, &layer) && layer.argb &&
++                   layer.w > 0 && layer.h > 0;
++    }
++  }
++  if (!have_layer && ov_cap && g_game->draw_modal) {
 +    /* The panel module composites onto opaque pixels. Drawing it over black
 +     * and over white recovers its coverage: on black the result is the
 +     * premultiplied colour, and white minus black is 1 - alpha. */
@@ -437,6 +742,11 @@ index 254dda5..7a3654e 100644
 +  } else {
 +    memset(pixel_buffer, 0, (size_t)base_h * (size_t)pitch);
 +  }
++  if (have_layer) {
++    g_present_layer = layer.argb;
++    g_present_layer_x = layer.x; g_present_layer_y = layer.y;
++    g_present_layer_w = layer.w; g_present_layer_h = layer.h;
++  }
 +  if (have_ov) {
 +    g_present_overlay = ov_black;
 +    g_present_overlay_w = draw_w;
@@ -444,12 +754,13 @@ index 254dda5..7a3654e 100644
 +  }
 +  g_renderer_funcs.EndDraw();
 +  g_present_overlay = NULL;
++  g_present_layer = NULL;
 +}
 +
  static void PresentFrozenWithOverlay(void) {
    const uint32_t *panel = NULL;
    int pw = 0, ph = 0;
-@@ -2284,10 +2378,16 @@ static SDL_Renderer *g_renderer;
+@@ -2284,10 +2416,16 @@ static SDL_Renderer *g_renderer;
  static SDL_Texture *g_texture;
  static SDL_Rect g_sdl_renderer_rect;
  static SDL_Rect g_sdl_present_rect;
@@ -467,7 +778,7 @@ index 254dda5..7a3654e 100644
      fprintf(stderr, "Warning: Shaders are supported only with the OpenGL backend\n");
  
    /* SDL3 dropped the renderer flags argument (software vs accelerated is
-@@ -2367,16 +2467,58 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
+@@ -2367,16 +2505,82 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
                                     (void **)pixels, pitch)) {
      printf("Failed to lock texture: %s\n", SDL_GetError());
      *pixels = NULL;
@@ -526,10 +837,34 @@ index 254dda5..7a3654e 100644
 +      }
 +    }
 +  }
++  {
++    /* The window-resolution modal layer: 1:1, nearest, never stretched. */
++    static SDL_Texture *ly_tex;
++    static int ly_w, ly_h;
++    const uint32_t *ly = NULL;
++    int lx = 0, lyy = 0, lw = 0, lh = 0;
++    if (snesrecomp_present_layer(&ly, &lx, &lyy, &lw, &lh) && ly) {
++      if (!ly_tex || ly_w != lw || ly_h != lh) {
++        if (ly_tex) SDL_DestroyTexture(ly_tex);
++        ly_tex = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888,
++                                   SDL_TEXTUREACCESS_STREAMING, lw, lh);
++        ly_w = lw;
++        ly_h = lh;
++      }
++      if (ly_tex) {
++        SDL_SetTextureBlendMode(ly_tex, SDL_BLENDMODE_BLEND);
++        snesrecomp_sdl_set_texture_linear(ly_tex, false);
++        SDL_UpdateTexture(ly_tex, NULL, ly, lw * 4);
++        SDL_Rect src = {0, 0, lw, lh};
++        SDL_Rect dst = {lx, lyy, lw, lh};
++        snesrecomp_sdl_render_texture(g_renderer, ly_tex, &src, &dst);
++      }
++    }
++  }
    SDL_RenderPresent(g_renderer);
  }
  
-@@ -2816,6 +2958,8 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
+@@ -2816,6 +3020,8 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
                                     : "Aspect ratio";
      gi->aspect_setting_help = game->aspect_setting_help;
    }
@@ -538,7 +873,7 @@ index 254dda5..7a3654e 100644
    /* Rewind rows. The runtime has always had the ring; without this the
     * player has no way to size it or switch it off. */
    gi->has_rewind_depth = game->rewind_settings ? 1 : 0;
-@@ -2895,6 +3039,8 @@ static void LauncherCommit(const RecompLauncherCSettings *ls, const char *config
+@@ -2895,6 +3101,8 @@ static void LauncherCommit(const RecompLauncherCSettings *ls, const char *config
                                             ? kSnesVSync_Adaptive
                                             : kSnesVSync_On;
    RendererApply(ls->renderer);   /* sets renderer + output_method */
@@ -547,7 +882,7 @@ index 254dda5..7a3654e 100644
  #if defined(SNES_HAS_LOBBY_CLIENT)
    /* The Netplay page persisted the name itself the moment it was
     * typed (snes_netplay_identity_store). g_config still holds what
-@@ -2999,12 +3145,65 @@ static const char *RestartReason(const Config *before, const char *rom,
+@@ -2999,12 +3207,71 @@ static const char *RestartReason(const Config *before, const char *rom,
    }
    return NULL;
  }
@@ -585,6 +920,12 @@ index 254dda5..7a3654e 100644
  #endif /* RECOMP_LAUNCHER */
  
 +void snesrecomp_desktop_open_launcher(void) { g_open_launcher_hotkey = 1; }
++int snesrecomp_desktop_background_input(void) { return g_config.background_input ? 1 : 0; }
++void snesrecomp_desktop_set_background_input(int enabled) {
++  if ((g_config.background_input ? 1 : 0) == (enabled ? 1 : 0)) return;
++  g_config.background_input = enabled != 0;
++  WriteConfigFile(g_active_config_file);
++}
 +void snesrecomp_desktop_command(int command) { HandleCommand((uint32)command, true); }
 +
  /* The in-game launcher (SnesDesktopHostGame.in_game_launcher). The guest is
@@ -613,10 +954,37 @@ index 254dda5..7a3654e 100644
  static void RunInGameLauncher(bool *running, const char **exit_reason) {
  #if !defined(RECOMP_LAUNCHER)
    (void)running; (void)exit_reason;
-@@ -3917,6 +4116,17 @@ error_reading:;
+@@ -3916,7 +4183,44 @@ error_reading:;
+     host_report_crash_test_tick();
  
      double event_profile_start = ProfileStart();
++    /* [Controller] BackgroundInput off: while the window is unfocused,
++     * controller presses and stick motion are dropped, and everything held
++     * is released once when focus goes, so nothing sticks. Releases always
++     * pass. The mapping itself is untouched. */
++    const bool pad_blocked = !g_config.background_input && g_window &&
++        !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS);
++    {
++      static bool was_blocked;
++      if (pad_blocked && !was_blocked) {
++        for (int gp = 0; gp < (int)countof(g_gamepad); gp++) {
++          GamepadInfo *gi = &g_gamepad[gp];
++          for (int b = 0; b < kGamepadBtn_Count; b++)
++            if (gi->modifiers & (1 << b))
++              HandleGamepadInput(gi, b, false);
++          HandleGamepadAxisInput(gi, SDL_CONTROLLER_AXIS_LEFTX, 0);
++          HandleGamepadAxisInput(gi, SDL_CONTROLLER_AXIS_LEFTY, 0);
++          HandleGamepadAxisInput(gi, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 0);
++          HandleGamepadAxisInput(gi, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 0);
++        }
++      }
++      was_blocked = pad_blocked;
++    }
      while (SDL_PollEvent(&event)) {
++      if (pad_blocked &&
++          (event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERAXISMOTION ||
++           event.type == SDL_JOYBUTTONDOWN || event.type == SDL_JOYAXISMOTION))
++        continue;
 +      if (g_game->on_gamepad_button &&
 +          (event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP) &&
 +          g_game->on_gamepad_button(SNESRECOMP_SDL_EVENT_BUTTON(event),
@@ -631,7 +999,7 @@ index 254dda5..7a3654e 100644
        if (HandleDeviceEvent(&event))
          continue;
        switch (event.type) {
-@@ -3974,6 +4184,19 @@ error_reading:;
+@@ -3974,6 +4278,19 @@ error_reading:;
      }
  
      ProfileEnd(kProfileEvents, event_profile_start);
@@ -651,7 +1019,7 @@ index 254dda5..7a3654e 100644
      if (g_paused != audiopaused) {
        audiopaused = g_paused;
        SetAudioPaused(audiopaused);
-@@ -4264,6 +4487,10 @@ error_reading:;
+@@ -4264,6 +4581,10 @@ error_reading:;
        if (!running) break;
        continue;   /* guest was frozen: no frame to run or present */
      }
@@ -663,7 +1031,7 @@ index 254dda5..7a3654e 100644
      if ((g_rewind_hotkey || PadGesturePressed(&g_rewind_gesture)) && !snes_rewind_is_open() &&
          !snes_savestate_menu_is_open()) {
 diff --git a/runner/src/desktop/host_main.h b/runner/src/desktop/host_main.h
-index 03b6f06..35789fc 100644
+index 03b6f06..11419fe 100644
 --- a/runner/src/desktop/host_main.h
 +++ b/runner/src/desktop/host_main.h
 @@ -35,6 +35,7 @@
@@ -674,7 +1042,25 @@ index 03b6f06..35789fc 100644
  #include <stddef.h>
  #include <stdint.h>
  #include "display_aspect.h"
-@@ -197,6 +198,28 @@ typedef struct SnesDesktopHostGame {
+@@ -60,6 +61,17 @@ typedef struct SnesDesktopHostFrameStats {
+   int audio_output_rate;     /* device rate, 0 when audio is disabled */
+ } SnesDesktopHostFrameStats;
+ 
++typedef struct SnesModalLayerView {
++  int out_w, out_h;                 /* drawable size in pixels */
++  int vp_x, vp_y, vp_w, vp_h;       /* game picture rect, top-left origin */
++  const uint32_t *frame;            /* frozen game frame, ARGB8888 */
++  int frame_w, frame_h;
++} SnesModalLayerView;
++typedef struct SnesModalLayer {
++  const uint32_t *argb;             /* straight alpha, w*h, pitch w */
++  int x, y, w, h;
++} SnesModalLayer;
++
+ typedef struct SnesDesktopHostGame {
+   /* ── Identity ─────────────────────────────────────────────────────────── */
+   const char *display_name;      /* "Super Metroid" (report header, launcher) */
+@@ -197,6 +209,36 @@ typedef struct SnesDesktopHostGame {
    /* After the gameplay loop ends, before SDL resources are destroyed or a
     * relaunch begins. Stop title-owned workers here. No further frames run. */
    void (*on_shutdown)(void);
@@ -693,6 +1079,14 @@ index 03b6f06..35789fc 100644
 +  /* Draw the modal panel into an ARGB8888 frame that already holds the last
 +   * presented picture (upscaled 2x). */
 +  void (*draw_modal)(uint8_t *dst, size_t pitch, int w, int h);
++  /* Optional, preferred over draw_modal when it returns nonzero: the panel
++   * as a separate sharp layer at WINDOW pixel resolution. `view` says how big
++   * the drawable is, where the game picture sits in it and what the frozen
++   * frame holds (for a frosted backdrop). The title returns a straight-alpha
++   * ARGB8888 buffer and where it goes (drawable pixels, top-left origin); the
++   * presenters draw it 1:1 over the shaded picture. */
++  int (*draw_modal_layer)(const struct SnesModalLayerView *view,
++                          struct SnesModalLayer *out);
 +
 +  /* With aspect_labels: a title-owned setting behind that launcher row
 +   * (Demon's Crest: the widescreen view). get seeds the row's index; set
@@ -703,7 +1097,7 @@ index 03b6f06..35789fc 100644
  } SnesDesktopHostGame;
  
  /* The whole program. Returns the process exit code. */
-@@ -212,6 +235,41 @@ void snesrecomp_desktop_set_widescreen(int enabled);
+@@ -212,6 +254,45 @@ void snesrecomp_desktop_set_widescreen(int enabled);
   * that just changed its presentation settings). */
  void snesrecomp_desktop_request_clock_reset(void);
  
@@ -738,6 +1132,10 @@ index 03b6f06..35789fc 100644
 +/* Open the full launcher over the frozen game at the next frame boundary
 + * (needs SnesDesktopHostGame.in_game_launcher). */
 +void snesrecomp_desktop_open_launcher(void);
++/* [Controller] BackgroundInput: 0 (default) ignores controller input while
++ * the window is unfocused. The setter writes config.ini. */
++int snesrecomp_desktop_background_input(void);
++void snesrecomp_desktop_set_background_input(int enabled);
 +/* Run a hotkey command (config.h kKeys_*: kKeys_Save + slot, kKeys_Load +
 + * slot, kKeys_Reset, kKeys_SaveStateMenu, ...) as if its key was pressed. */
 +void snesrecomp_desktop_command(int command);
@@ -745,8 +1143,37 @@ index 03b6f06..35789fc 100644
  #ifdef __cplusplus
  }
  #endif
+diff --git a/runner/src/desktop/mmx_config.c b/runner/src/desktop/mmx_config.c
+index b4af7fd..6cd35ee 100644
+--- a/runner/src/desktop/mmx_config.c
++++ b/runner/src/desktop/mmx_config.c
+@@ -502,6 +502,8 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
+       return ParsePlayerSource(0, value);
+     } else if (StringEqualsNoCase(key, "SourceP2")) {
+       return ParsePlayerSource(1, value);
++    } else if (StringEqualsNoCase(key, "BackgroundInput")) {
++      return ParseBool(value, &g_config.background_input);
+     }
+     /* GuidPn / DeadzonePn are the launcher's business; accepted silently so
+      * the runner does not report the launcher's own keys as unknown. */
+@@ -921,6 +923,7 @@ void WriteConfigFile(const char *filename) {
+     { "Sound",      "Volume" },
+     { "Controller", "SourceP1" },
+     { "Controller", "SourceP2" },
++    { "Controller", "BackgroundInput" },
+     { "Rewind",     "Enabled" },
+     { "Rewind",     "Depth" },
+     { "Rewind",     "Interval" },
+@@ -960,6 +963,7 @@ void WriteConfigFile(const char *filename) {
+   CfgSet(kvs, N, "Sound", "Volume", "%d", g_config.volume);
+   CfgSet(kvs, N, "Controller", "SourceP1", "%d", g_config.player_src[0]);
+   CfgSet(kvs, N, "Controller", "SourceP2", "%d", g_config.player_src[1]);
++  CfgSet(kvs, N, "Controller", "BackgroundInput", "%d", g_config.background_input ? 1 : 0);
+   if (s_rewind_keys) {
+     CfgSet(kvs, N, "Rewind", "Enabled", "%d", g_config.rewind_enabled ? 1 : 0);
+     CfgSet(kvs, N, "Rewind", "Depth", "%d", g_config.rewind_depth);
 diff --git a/runner/src/desktop/opengl.c b/runner/src/desktop/opengl.c
-index e9063a7..cd275b0 100644
+index e9063a7..14d1608 100644
 --- a/runner/src/desktop/opengl.c
 +++ b/runner/src/desktop/opengl.c
 @@ -39,6 +39,7 @@
@@ -869,7 +1296,7 @@ index e9063a7..cd275b0 100644
    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
    glDisable(GL_BLEND);
    return true;
-@@ -402,19 +476,84 @@ static void OpenGLRenderer_EndDraw(void) {
+@@ -402,19 +476,141 @@ static void OpenGLRenderer_EndDraw(void) {
    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
    glClear(GL_COLOR_BUFFER_BIT);
  
@@ -953,10 +1380,67 @@ index e9063a7..cd275b0 100644
 +    }
 +  }
 +
++  {
++    /* The window-resolution modal layer: 1:1, nearest (host PresentTitleModal). */
++    const uint32_t *ly = NULL;
++    int lx = 0, lyy = 0, lw = 0, lh = 0;
++    if (snesrecomp_present_layer(&ly, &lx, &lyy, &lw, &lh) && ly) {
++      static GLuint ly_tex, ly_vao, ly_vbo;
++      static int ly_w, ly_h;
++      if (!ly_tex) glGenTextures(1, &ly_tex);
++      if (!ly_vao) {
++        static const float kLyVertices[] = {
++          -1.0f,  1.0f, 0.0f,   0.0f, 0.0f,
++          -1.0f, -1.0f, 0.0f,   0.0f, 1.0f,
++           1.0f,  1.0f, 0.0f,   1.0f, 0.0f,
++           1.0f, -1.0f, 0.0f,   1.0f, 1.0f,
++        };
++        glGenVertexArrays(1, &ly_vao);
++        glGenBuffers(1, &ly_vbo);
++        glBindVertexArray(ly_vao);
++        glBindBuffer(GL_ARRAY_BUFFER, ly_vbo);
++        glBufferData(GL_ARRAY_BUFFER, sizeof(kLyVertices), kLyVertices, GL_STATIC_DRAW);
++        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
++        glEnableVertexAttribArray(0);
++        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
++        glEnableVertexAttribArray(1);
++        glBindBuffer(GL_ARRAY_BUFFER, 0);
++        glBindVertexArray(g_VAO);
++      }
++      glActiveTexture(GL_TEXTURE0);
++      glBindTexture(GL_TEXTURE_2D, ly_tex);
++      glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
++      if (lw != ly_w || lh != ly_h) {
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, lw, lh, 0, GL_BGRA,
++                     GL_UNSIGNED_INT_8_8_8_8_REV, ly);
++        ly_w = lw;
++        ly_h = lh;
++      } else {
++        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, lw, lh, GL_BGRA,
++                        GL_UNSIGNED_INT_8_8_8_8_REV, ly);
++      }
++      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++      glBindFramebuffer(GL_FRAMEBUFFER, 0);
++      glViewport(lx, drawable_height - lyy - lh, lw, lh);
++      glEnable(GL_BLEND);
++      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
++      glUseProgram(g_program);
++      glUniform1i(glGetUniformLocation(g_program, "texture1"), 0);
++      glBindVertexArray(ly_vao);
++      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++      glBindVertexArray(g_VAO);
++      glDisable(GL_BLEND);
++      glBindTexture(GL_TEXTURE_2D, g_texture.gl_texture);
++    }
++  }
++
    if (g_want_screenshot) {
      g_want_screenshot = false;
      SaveScreenshotBmp(drawable_width, drawable_height);
-@@ -426,6 +565,9 @@ static void OpenGLRenderer_EndDraw(void) {
+@@ -426,6 +622,9 @@ static void OpenGLRenderer_EndDraw(void) {
        g_screenshot_flash_start_time = -1.0;
    }
  
@@ -967,10 +1451,10 @@ index e9063a7..cd275b0 100644
  }
  
 diff --git a/runner/src/desktop/opengl.h b/runner/src/desktop/opengl.h
-index e7ed472..ab6e4e1 100644
+index e7ed472..2025814 100644
 --- a/runner/src/desktop/opengl.h
 +++ b/runner/src/desktop/opengl.h
-@@ -25,6 +25,31 @@ void snesrecomp_opengl_set_viewport(void (*compute)(int, int, int, int,
+@@ -25,6 +25,34 @@ void snesrecomp_opengl_set_viewport(void (*compute)(int, int, int, int,
  /* Capture the next fully composited OpenGL frame to screenshots/*.bmp. */
  void OpenGLRenderer_RequestScreenshot(void);
  
@@ -998,6 +1482,9 @@ index e7ed472..ab6e4e1 100644
 + * modal menus, so the game behind them still goes through the shader. */
 +#include <stdint.h>
 +bool snesrecomp_present_overlay(const uint32_t **argb, int *w, int *h);
++/* The window-resolution modal layer (draw_modal_layer), drawn 1:1 at
++ * (x, y) top-left in drawable pixels. */
++bool snesrecomp_present_layer(const uint32_t **argb, int *x, int *y, int *w, int *h);
 +
  #ifdef __cplusplus
  }

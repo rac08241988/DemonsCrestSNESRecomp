@@ -8,14 +8,18 @@
  * launcher's way (config.ini, live apply, or a resuming restart). Rows here
  * only edit that struct; nothing about a setting is re-implemented.
  *
- * Sections: Video (Shader, Widescreen, 120Hz motion, Renderer, VSync, Frame
- * blend, Run-ahead), Save states, Display, Audio, Controls, System.
+ * v1.1.0: a side panel drawn at window resolution (host draw_modal_layer)
+ * over the live, shaded game: tabs Video / Display / Audio / Controls /
+ * Shaders / System, edits are pending until Apply, shaders preview live.
+ * Input is read here ONLY while the panel is open; closed, every key and
+ * button goes to the game exactly as before.
  */
 #include "dc_options.h"
 #include "dc_interp.h"
 #include "dc_libra.h"
 #include "dc_widescreen.h"
-#include "recomp_runtime_ui.h"
+#include "ui/rpanel.h"
+#include <math.h>
 #include "desktop/config.h"
 #include "desktop/host_main.h"
 #include "desktop/opengl.h"
@@ -255,431 +259,6 @@ static int ls_apply(void) {
 }
 #endif
 
-/* ---- menu ---------------------------------------------------------------- */
-
-static RecompRuntimeUi *g_ui;
-static char g_status[256];
-static bool g_initialized;
-static bool g_accepting;      /* the ACCEPT input is being handled */
-static char g_shader_desc[400];
-static char g_slot_desc[200];
-static char g_renderer_desc[200];
-
-static bool is(const RecompRuntimeUiItem *item, const char *key) {
-  return item && item->key && strcmp(item->key, key) == 0;
-}
-
-static void status(const char *fmt, const char *a, const char *b) {
-  snprintf(g_status, sizeof(g_status), fmt, a ? a : "", b ? b : "");
-  recomp_runtime_ui_set_status(g_ui, g_status);
-  fprintf(stderr, "[dc] options: %s\n", g_status);
-}
-
-static const char *renderer_now(void) {
-  switch (DcLibra_Backend()) {
-  case DC_LIBRA_GL: return "OpenGL";
-  case DC_LIBRA_VULKAN: return "Vulkan";
-  default: return NULL;
-  }
-}
-
-/* What the selected preset would do on the live renderer. */
-static void describe_shader(int index) {
-  DcLibraBackend be = DcLibra_Backend();
-  const char *pending = index != g_current ? "Enter applies. " : "";
-  if (be == DC_LIBRA_NONE) {
-    snprintf(g_shader_desc, sizeof(g_shader_desc),
-             "%s This renderer (%s) cannot run them: pick a preset and press Enter "
-             "to switch to OpenGL (restarts, resumes where you are), or set "
-             "Renderer to Vulkan or OpenGL.",
-             DC_SHADER_NOTE, snesrecomp_desktop_renderer_id());
-  } else if (index > 0 && g_kinds[index] == kKindGlsl && be == DC_LIBRA_VULKAN) {
-    snprintf(g_shader_desc, sizeof(g_shader_desc),
-             "%sGLSL presets need OpenGL: Enter switches the renderer to OpenGL "
-             "(restarts, resumes where you are). Slang presets run on Vulkan.",
-             pending);
-  } else {
-    snprintf(g_shader_desc, sizeof(g_shader_desc),
-             "%s%s L/R: %zu presets, Enter applies (now %s).",
-             pending, DC_SHADER_NOTE, g_count - 1, renderer_now());
-  }
-}
-
-static void describe_slot(void) {
-  char path[512];
-  RtlSaveSlotPath(g_slot - 1, path, sizeof(path));
-  struct stat st;
-  if (stat(path, &st) == 0)
-    snprintf(g_slot_desc, sizeof(g_slot_desc),
-             "Slot %d holds a state. Save State overwrites it; Load State "
-             "returns to it.", g_slot);
-  else
-    snprintf(g_slot_desc, sizeof(g_slot_desc), "Slot %d is empty.", g_slot);
-}
-
-static void apply_shader(int want) {
-  g_shader_pending = -1;
-  if (want < 0 || (size_t)want >= g_count) return;
-  DcLibraBackend be = DcLibra_Backend();
-  PresetKind kind = g_kinds[want];
-  if (want > 0 && (be == DC_LIBRA_NONE || (kind == kKindGlsl && be == DC_LIBRA_VULKAN))) {
-    /* Save the pick, then restart on OpenGL, which runs both kinds. */
-    g_current = want;
-    save_choice();
-    status("Shader %s: switching to OpenGL (restart, resumes here)%s", g_labels[want], "");
-    snesrecomp_desktop_request_renderer_restart("opengl");
-    return;
-  }
-  /* Turn the other kind off first. */
-  if (kind != kKindGlsl && OpenGLRenderer_IsActive()) OpenGLRenderer_SetShader(NULL);
-  if (kind != kKindSlang) DcLibra_SetPreset(NULL);
-  if (want == 0) {
-    g_current = 0;
-    g_config.shader = NULL;
-    save_choice();
-    status("Shader: Off%s%s", "", "");
-    return;
-  }
-  if (kind == kKindGlsl) {
-    if (OpenGLRenderer_SetShader(g_paths[want])) {
-      g_current = want;
-      static char path[1100];
-      snprintf(path, sizeof(path), "%s", g_paths[want]);
-      g_config.shader = path;
-      save_choice();
-      status("Shader: %s%s", g_labels[want], "");
-    } else {
-      status("Failed: %s%s", g_labels[want], "");
-    }
-    return;
-  }
-  g_config.shader = NULL;
-  DcLibra_SetPreset(g_paths[want]);
-  g_shader_waiting = want;
-  status("Loading %s...%s", g_labels[want], "");
-}
-
-/* librashader builds the chain on the next presented frame. */
-static void poll_shader(void) {
-  char msg[256];
-  int o = DcLibra_Poll(msg, sizeof(msg));
-  if (!o || g_shader_waiting < 0) return;
-  int want = g_shader_waiting;
-  g_shader_waiting = -1;
-  if (o > 0) {
-    g_current = want;
-    save_choice();
-    status("Shader: %s (%s)", g_labels[want], msg);
-  } else {
-    status("Failed: %s: %s", g_labels[want], msg);
-  }
-}
-
-static int ui_get(void *ctx, const RecompRuntimeUiItem *item, int *out) {
-  (void)ctx;
-  if (is(item, "graphics.shader_preset")) {
-    *out = g_shader_pending >= 0 ? g_shader_pending : g_current;
-    describe_shader(*out);
-    return 1;
-  }
-  if (is(item, "graphics.widescreen")) { *out = DcWidescreenSetting_Get(); return 1; }
-  if (is(item, "graphics.motion")) { *out = (int)DcInterp_GetMode(); return 1; }
-  if (is(item, RECOMP_RUNTIME_UI_KEY_STATE_SLOT)) { *out = g_slot; describe_slot(); return 1; }
-#if defined(RECOMP_LAUNCHER)
-  RecompLauncherCSettings *s = ls();
-  if (is(item, "video.renderer")) {
-    *out = g_renderer_pending >= 0 ? g_renderer_pending : s->renderer;
-    snprintf(g_renderer_desc, sizeof(g_renderer_desc),
-             "%sNeeds a restart: Enter restarts the game on it and resumes where "
-             "you are. %s",
-             *out != s->renderer ? "Not applied yet. " : "", DC_SHADER_NOTE);
-    return 1;
-  }
-  if (is(item, "video.vsync")) { *out = s->vsync >= 1 && s->vsync <= 3 ? s->vsync : 1; return 1; }
-  if (is(item, "video.frame_blend")) { *out = s->frame_blend != 0; return 1; }
-  if (is(item, "video.run_ahead")) { *out = s->run_ahead; return 1; }
-  if (is(item, RECOMP_RUNTIME_UI_KEY_FULLSCREEN)) { *out = s->fullscreen; return 1; }
-  if (is(item, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE)) { *out = s->window_scale; return 1; }
-  if (is(item, "display.stretch")) { *out = s->ignore_aspect != 0; return 1; }
-  if (is(item, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER)) { *out = s->linear_filter != 0; return 1; }
-  if (is(item, RECOMP_RUNTIME_UI_KEY_VOLUME)) { *out = s->volume; return 1; }
-  if (is(item, "audio.rate")) {
-    int want = g_rate_pending >= 0 ? g_rate_pending : s->audio_freq;
-    *out = kAudioRateValues[0];
-    for (int i = 0; i < 4; i++)
-      if (kAudioRateValues[i] == want) *out = want;
-    return 1;
-  }
-  if (is(item, "controls.p1")) { *out = s->player_src[0]; return 1; }
-  if (is(item, "controls.p2")) { *out = s->player_src[1]; return 1; }
-  if (is(item, "controls.deadzone")) { *out = s->deadzone[0]; return 1; }
-  if (is(item, "system.skip_launcher")) { *out = s->skip_launcher != 0; return 1; }
-#endif
-  return 0;
-}
-
-static int ui_set(void *ctx, const RecompRuntimeUiItem *item, int value) {
-  (void)ctx;
-  if (is(item, "graphics.shader_preset")) {
-    if (g_accepting) {   /* Enter applies the pick (or the shown preset) */
-      apply_shader(g_shader_pending >= 0 ? g_shader_pending : g_current);
-      return 0;
-    }
-    if (value < 0 || (size_t)value >= g_count) return 0;
-    g_shader_pending = value;
-    return 0;  /* nothing saved yet: no "Saved" toast */
-  }
-  if (is(item, "graphics.widescreen")) {
-    if (value < 0 || value > 4) return 0;
-    if (!DcWidescreenSetting_Set(value))
-      fprintf(stderr, "[dc] widescreen: the mod state could not be saved\n");
-    status("Widescreen: %s%s", kWidescreenLabels[value], "");
-    return 0;
-  }
-  if (is(item, "graphics.motion")) {
-    if (value < 0 || value > 2) return 0;
-    DcInterp_SetMode((DcMotionMode)value);
-    snesrecomp_desktop_request_clock_reset();
-    save_choice();
-    status("120Hz motion: %s%s", kMotionLabels[value],
-           value ? " (active on 100 Hz+ displays)" : "");
-    return 0;
-  }
-  if (is(item, RECOMP_RUNTIME_UI_KEY_STATE_SLOT)) {
-    if (value < 1 || value > DC_STATE_SLOTS) return 0;
-    g_slot = value;
-    save_choice();
-    return 1;
-  }
-#if defined(RECOMP_LAUNCHER)
-  RecompLauncherCSettings *s = ls();
-  if (is(item, "video.renderer")) {
-    if (g_accepting) {
-      int want = g_renderer_pending >= 0 ? g_renderer_pending : s->renderer;
-      g_renderer_pending = -1;
-      if (want == s->renderer) return 0;
-      s->renderer = want;
-      status("Renderer: %s (restarting, resumes here)%s",
-             g_renderer_labels && want < g_renderer_count ? g_renderer_labels[want] : "", "");
-      ls_apply();
-      return 0;
-    }
-    if (value < 0 || value >= g_renderer_count) return 0;
-    g_renderer_pending = value;
-    return 0;
-  }
-  if (is(item, "audio.rate")) {
-    if (g_accepting) {
-      int want = g_rate_pending >= 0 ? g_rate_pending : s->audio_freq;
-      g_rate_pending = -1;
-      if (want == s->audio_freq) return 0;
-      s->audio_freq = want;
-      status("Audio rate changed (restarting, resumes here)%s%s", "", "");
-      ls_apply();
-      return 0;
-    }
-    g_rate_pending = value;
-    return 0;
-  }
-  if (is(item, "video.vsync")) s->vsync = value;
-  else if (is(item, "video.frame_blend")) s->frame_blend = value;
-  else if (is(item, "video.run_ahead")) s->run_ahead = value;
-  else if (is(item, RECOMP_RUNTIME_UI_KEY_FULLSCREEN)) s->fullscreen = value;
-  else if (is(item, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE)) s->window_scale = value;
-  else if (is(item, "display.stretch")) s->ignore_aspect = value;
-  else if (is(item, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER)) s->linear_filter = value;
-  else if (is(item, RECOMP_RUNTIME_UI_KEY_VOLUME)) s->volume = value;
-  else if (is(item, "controls.p1")) s->player_src[0] = value;
-  else if (is(item, "controls.p2")) s->player_src[1] = value;
-  else if (is(item, "controls.deadzone")) s->deadzone[0] = s->deadzone[1] = value;
-  else if (is(item, "system.skip_launcher")) s->skip_launcher = value;
-  else return 0;
-  ls_apply();
-  return 1;
-#else
-  return 0;
-#endif
-}
-
-static int ui_action(void *ctx, const RecompRuntimeUiItem *item) {
-  (void)ctx;
-  char n[16];
-  snprintf(n, sizeof(n), "%d", g_slot);
-  if (is(item, RECOMP_RUNTIME_UI_KEY_RESUME)) {
-    recomp_runtime_ui_close(g_ui);
-    return 1;
-  }
-  if (is(item, RECOMP_RUNTIME_UI_KEY_SAVE_STATE)) {
-    snesrecomp_desktop_command(kKeys_Save + g_slot - 1);
-    status("Saved state to slot %s%s", n, "");
-    return 0;
-  }
-  if (is(item, RECOMP_RUNTIME_UI_KEY_LOAD_STATE)) {
-    char path[512];
-    struct stat st;
-    RtlSaveSlotPath(g_slot - 1, path, sizeof(path));
-    if (stat(path, &st) != 0) {
-      status("Slot %s is empty%s", n, "");
-      return 0;
-    }
-    snesrecomp_desktop_command(kKeys_Load + g_slot - 1);
-    fprintf(stderr, "[dc] options: loaded state slot %d\n", g_slot);
-    recomp_runtime_ui_close(g_ui);
-    return 1;
-  }
-  if (is(item, "controls.bindings")) {
-    recomp_runtime_ui_close(g_ui);
-    snesrecomp_desktop_open_launcher();
-    return 1;
-  }
-  if (is(item, RECOMP_RUNTIME_UI_KEY_RESET)) {
-    if (!recomp_runtime_ui_confirm(g_ui, item, "Press again to reset the console")) return 0;
-    recomp_runtime_ui_close(g_ui);
-    snesrecomp_desktop_command(kKeys_Reset);
-    return 1;
-  }
-  if (is(item, RECOMP_RUNTIME_UI_KEY_QUIT)) {
-    if (!recomp_runtime_ui_confirm(g_ui, item, "Press again to quit")) return 0;
-    SDL_Event e;
-    memset(&e, 0, sizeof(e));
-#if SNESRECOMP_SDL3
-    e.type = SDL_EVENT_QUIT;
-#else
-    e.type = SDL_QUIT;
-#endif
-    SDL_PushEvent(&e);
-    return 1;
-  }
-  return 0;
-}
-
-static int ui_enabled(void *ctx, const RecompRuntimeUiItem *item) {
-  (void)ctx;
-  /* Every row stays live: on a renderer that cannot run shaders the Shader
-   * row says why and offers the switch (describe_shader). */
-  if (is(item, "graphics.shader_preset")) return g_count > 1;
-  return 1;
-}
-
-static void ui_visibility(void *ctx, int open) {
-  (void)ctx;
-#if defined(RECOMP_LAUNCHER)
-  g_ls_valid = false;          /* re-seed from the live config */
-  g_renderer_pending = g_rate_pending = -1;
-#endif
-  if (!open) g_shader_pending = -1;
-}
-
-#define ITEM_COUNT 32
-static RecompRuntimeUiItem g_items[ITEM_COUNT];
-static size_t g_item_count;
-
-static RecompRuntimeUiItem *add(const char *key, const char *section, const char *label,
-                                const char *desc, RecompRuntimeUiItemType type) {
-  RecompRuntimeUiItem *it = &g_items[g_item_count++];
-  memset(it, 0, sizeof(*it));
-  it->key = key;
-  it->section = section;
-  it->label = label;
-  it->description = desc;
-  it->type = type;
-  it->step = 1;
-  return it;
-}
-
-static void choices(RecompRuntimeUiItem *it, const char *const *labels, size_t n,
-                    const int *values, int minimum) {
-  it->type = RECOMP_RUNTIME_UI_CHOICE;
-  it->choices = labels;
-  it->choice_count = n;
-  it->choice_values = values;
-  it->minimum = minimum;
-  it->maximum = minimum + (int)n - 1;
-}
-
-static void build_items(void) {
-  RecompRuntimeUiItem *it;
-  /* Video */
-  it = add("graphics.shader_preset", "Video", "Shader", g_shader_desc, RECOMP_RUNTIME_UI_CHOICE);
-  choices(it, (const char *const *)g_labels, g_count, NULL, 0);
-  it = add("graphics.widescreen", "Video", "Widescreen",
-           "Show the stage beyond the 256-column view. Adaptive fits the window; "
-           "16:9, 21:9 and 32:9 are fixed. Applies now; same switch as the "
-           "launcher's Widescreen row and Mods screen.", RECOMP_RUNTIME_UI_CHOICE);
-  choices(it, kWidescreenLabels, 5, NULL, 0);
-  it = add("graphics.motion", "Video", "120Hz motion",
-           "120Hz output, 60Hz logic (100 Hz+ displays)", RECOMP_RUNTIME_UI_CHOICE);
-  choices(it, kMotionLabels, 3, NULL, 0);
-#if defined(RECOMP_LAUNCHER)
-  g_renderer_labels = snesrecomp_desktop_renderer_labels(&g_renderer_count);
-  if (g_renderer_labels && g_renderer_count > 0) {
-    it = add("video.renderer", "Video", "Renderer", g_renderer_desc, RECOMP_RUNTIME_UI_CHOICE);
-    choices(it, g_renderer_labels, (size_t)g_renderer_count, NULL, 0);
-  }
-  it = add("video.vsync", "Video", "VSync",
-           "On: tear-free. Off: lowest latency. Adaptive: vsync above the "
-           "refresh rate, immediate below.", RECOMP_RUNTIME_UI_CHOICE);
-  choices(it, kVsyncLabels, 3, kVsyncValues, 1);
-  add("video.frame_blend", "Video", "Frame blend",
-      "Blend consecutive frames (flicker transparency)", RECOMP_RUNTIME_UI_BOOL);
-  it = add("video.run_ahead", "Video", "Run-ahead",
-           "Frames of input latency to hide (0 = off)", RECOMP_RUNTIME_UI_INT);
-  it->minimum = 0;
-  it->maximum = 4;
-#endif
-  /* Save states, right after Video */
-  it = add(RECOMP_RUNTIME_UI_KEY_STATE_SLOT, "Save states", "Slot", g_slot_desc,
-           RECOMP_RUNTIME_UI_INT);
-  it->minimum = 1;
-  it->maximum = DC_STATE_SLOTS;
-  add(RECOMP_RUNTIME_UI_KEY_SAVE_STATE, "Save states", "Save State",
-      "Save this moment to the selected slot", RECOMP_RUNTIME_UI_ACTION);
-  add(RECOMP_RUNTIME_UI_KEY_LOAD_STATE, "Save states", "Load State",
-      "Return to the state in the selected slot", RECOMP_RUNTIME_UI_ACTION);
-#if defined(RECOMP_LAUNCHER)
-  /* Display */
-  it = add(RECOMP_RUNTIME_UI_KEY_FULLSCREEN, "Display", "Fullscreen", NULL,
-           RECOMP_RUNTIME_UI_CHOICE);
-  choices(it, kFullscreenLabels, 3, NULL, 0);
-  it = add(RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE, "Display", "Window scale", NULL,
-           RECOMP_RUNTIME_UI_INT);
-  it->minimum = 1;
-  it->maximum = 10;
-  add("display.stretch", "Display", "Stretch to window",
-      "Ignore the aspect ratio and fill the window", RECOMP_RUNTIME_UI_BOOL);
-  add(RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER, "Display", "Linear filter",
-      "Smooth scaling (off: sharp pixels)", RECOMP_RUNTIME_UI_BOOL);
-  /* Audio */
-  it = add(RECOMP_RUNTIME_UI_KEY_VOLUME, "Audio", "Volume", NULL, RECOMP_RUNTIME_UI_INT);
-  it->minimum = 0;
-  it->maximum = 100;
-  it->step = 5;
-  it = add("audio.rate", "Audio", "Sample rate",
-           "Needs a restart: Enter restarts and resumes where you are.",
-           RECOMP_RUNTIME_UI_CHOICE);
-  choices(it, kAudioRateLabels, 4, kAudioRateValues, kAudioRateValues[0]);
-  /* Controls */
-  it = add("controls.p1", "Controls", "Player 1 input", NULL, RECOMP_RUNTIME_UI_CHOICE);
-  choices(it, kSourceLabels, 3, NULL, 0);
-  it = add("controls.p2", "Controls", "Player 2 input", NULL, RECOMP_RUNTIME_UI_CHOICE);
-  choices(it, kSourceLabels, 3, NULL, 0);
-  it = add("controls.deadzone", "Controls", "Stick deadzone", "Percent", RECOMP_RUNTIME_UI_INT);
-  it->minimum = 0;
-  it->maximum = 50;
-  it->step = 5;
-  add("controls.bindings", "Controls", "Keybinds & controller mapping",
-      "Opens the launcher's controller page; Play returns here.",
-      RECOMP_RUNTIME_UI_ACTION);
-#endif
-  /* System */
-  add(RECOMP_RUNTIME_UI_KEY_RESUME, "System", "Resume", NULL, RECOMP_RUNTIME_UI_ACTION);
-#if defined(RECOMP_LAUNCHER)
-  add("system.skip_launcher", "System", "Skip launcher at startup", NULL,
-      RECOMP_RUNTIME_UI_BOOL);
-#endif
-  add(RECOMP_RUNTIME_UI_KEY_RESET, "System", "Reset console", NULL, RECOMP_RUNTIME_UI_ACTION);
-  add(RECOMP_RUNTIME_UI_KEY_QUIT, "System", "Quit", NULL, RECOMP_RUNTIME_UI_ACTION);
-}
 
 /* shaders/slang/manifest.txt (same format as N64 Recomp Magical Tetris:
  * "id | path relative to shaders/slang | display name | license"), in its
@@ -727,6 +306,1080 @@ static bool add_slang_manifest(void) {
   return n > 0;
 }
 
+/* ---- shader apply / preview --------------------------------------------- */
+
+static char g_status[256];
+static double g_status_at;
+static int g_dirty = 1;
+static int g_preview = -1;           /* shown live behind the panel, not saved */
+static int g_preview_waiting = -1;
+
+static double now_s(void) { return (double)SDL_GetTicks() / 1000.0; }
+
+static void status(const char *fmt, const char *a, const char *b) {
+  snprintf(g_status, sizeof(g_status), fmt, a ? a : "", b ? b : "");
+  g_status_at = now_s();
+  g_dirty = 1;
+  fprintf(stderr, "[dc] options: %s\n", g_status);
+}
+
+static const char *renderer_now(void) {
+  switch (DcLibra_Backend()) {
+  case DC_LIBRA_GL: return "OpenGL";
+  case DC_LIBRA_VULKAN: return "Vulkan";
+  default: return NULL;
+  }
+}
+
+/* Can `i` run on the live renderer without a restart? */
+static bool shader_live_ok(int i) {
+  if (i <= 0) return true;
+  DcLibraBackend be = DcLibra_Backend();
+  if (be == DC_LIBRA_NONE) return false;
+  if (g_kinds[i] == kKindGlsl && be == DC_LIBRA_VULKAN) return false;
+  return true;
+}
+
+/* Put preset `want` on screen. save: also make it the saved choice. */
+static void run_shader(int want, bool save) {
+  if (want < 0 || (size_t)want >= g_count) return;
+  PresetKind kind = g_kinds[want];
+  if (kind != kKindGlsl && OpenGLRenderer_IsActive()) OpenGLRenderer_SetShader(NULL);
+  if (kind != kKindSlang) DcLibra_SetPreset(NULL);
+  if (want == 0) {
+    g_config.shader = NULL;
+    if (save) { g_current = 0; save_choice(); status("Shader: Off%s%s", "", ""); }
+    return;
+  }
+  if (kind == kKindGlsl) {
+    if (OpenGLRenderer_SetShader(g_paths[want])) {
+      static char path[1100];
+      snprintf(path, sizeof(path), "%s", g_paths[want]);
+      g_config.shader = path;
+      if (save) { g_current = want; save_choice(); status("Shader: %s%s", g_labels[want], ""); }
+    } else {
+      status("Failed: %s%s", g_labels[want], "");
+    }
+    return;
+  }
+  g_config.shader = NULL;
+  DcLibra_SetPreset(g_paths[want]);
+  if (save) { g_shader_waiting = want; status("Loading %s...%s", g_labels[want], ""); }
+  else g_preview_waiting = want;
+}
+
+/* Commit (Apply). */
+static void apply_shader(int want) {
+  g_shader_pending = -1;
+  if (want < 0 || (size_t)want >= g_count) return;
+  if (want > 0 && !shader_live_ok(want)) {
+    g_current = want;
+    save_choice();
+    status("Shader %s: switching to OpenGL (restart, resumes here)%s", g_labels[want], "");
+    snesrecomp_desktop_request_renderer_restart("opengl");
+    return;
+  }
+  g_preview = want;
+  run_shader(want, true);
+}
+
+static void preview_shader(int want) {
+  if (want == g_preview) return;
+  if (!shader_live_ok(want)) {
+    status("%s needs OpenGL: Apply switches the renderer (restart)%s", g_labels[want], "");
+    return;
+  }
+  g_preview = want;
+  run_shader(want, false);
+  if (want > 0) status("Previewing %s%s", g_labels[want], "");
+}
+
+static void poll_shader(void) {
+  char msg[256];
+  int o = DcLibra_Poll(msg, sizeof(msg));
+  if (!o) return;
+  if (g_shader_waiting >= 0) {
+    int want = g_shader_waiting;
+    g_shader_waiting = -1;
+    if (o > 0) {
+      g_current = want;
+      save_choice();
+      status("Shader: %s (%s)", g_labels[want], msg);
+    } else {
+      status("Failed: %s: %s", g_labels[want], msg);
+    }
+  } else if (g_preview_waiting >= 0) {
+    int want = g_preview_waiting;
+    g_preview_waiting = -1;
+    if (o > 0) status("Previewing %s (%s)", g_labels[want], msg);
+    else status("Failed: %s: %s", g_labels[want], msg);
+  }
+}
+
+/* ---- rows ---------------------------------------------------------------- */
+
+enum { T_VIDEO, T_DISPLAY, T_AUDIO, T_CONTROLS, T_SHADERS, T_SYSTEM, T_COUNT };
+static const char *const kTabNames[T_COUNT] = {"Video", "Display", "Audio", "Controls",
+                                               "Shaders", "System"};
+typedef enum { R_PICK, R_TOGGLE, R_SLIDER, R_ACTION, R_SHADER, R_NOTE } RowType;
+typedef struct Row {
+  const char *key, *label, *desc;
+  RowType type;
+  int tab;
+  const char *const *choices;
+  int nchoices;
+  const int *values;      /* pick: stored value per choice (NULL: min + index) */
+  int min, max, step;
+  const char *unit;
+  int cur, pend;          /* committed and edited values */
+} Row;
+#define DC_MAX_ROWS 40
+static Row g_rows[DC_MAX_ROWS];
+static int g_nrows;
+static const char *const *g_renderer_labels;
+static int g_renderer_count;
+static const char *const kOnOff[] = {"Off", "On"};
+
+static Row *row(const char *key, int tab, const char *label, const char *desc, RowType t) {
+  Row *r = &g_rows[g_nrows++];
+  memset(r, 0, sizeof(*r));
+  r->key = key; r->tab = tab; r->label = label; r->desc = desc; r->type = t;
+  r->step = 1;
+  return r;
+}
+static void pick(Row *r, const char *const *labels, int n, const int *values, int min) {
+  r->choices = labels; r->nchoices = n; r->values = values; r->min = min;
+  r->max = min + n - 1;
+}
+static bool key_is(const Row *r, const char *k) { return r->key && strcmp(r->key, k) == 0; }
+
+static int pick_index(const Row *r, int v) {
+  if (r->values) {
+    for (int i = 0; i < r->nchoices; i++) if (r->values[i] == v) return i;
+    return 0;
+  }
+  int i = v - r->min;
+  return i < 0 ? 0 : i >= r->nchoices ? r->nchoices - 1 : i;
+}
+static int pick_value(const Row *r, int i) { return r->values ? r->values[i] : r->min + i; }
+
+static void build_rows(void) {
+  Row *r;
+  g_nrows = 0;
+#if defined(RECOMP_LAUNCHER)
+  g_renderer_labels = snesrecomp_desktop_renderer_labels(&g_renderer_count);
+  if (g_renderer_labels && g_renderer_count > 0) {
+    r = row("video.renderer", T_VIDEO, "Renderer",
+            "Restarts on Apply and resumes where you are. Shaders only work on the "
+            "Vulkan and OpenGL renderers.", R_PICK);
+    pick(r, g_renderer_labels, g_renderer_count, NULL, 0);
+  }
+  r = row("video.vsync", T_VIDEO, "VSync",
+          "On: tear-free. Off: lowest latency. Adaptive: vsync above the refresh "
+          "rate, immediate below.", R_PICK);
+  pick(r, kVsyncLabels, 3, kVsyncValues, 1);
+#endif
+  r = row("graphics.motion", T_VIDEO, "120Hz motion",
+          "120 Hz output with 60 Hz game logic. Needs a 100 Hz+ display.", R_PICK);
+  pick(r, kMotionLabels, 3, NULL, 0);
+  r = row("graphics.widescreen", T_VIDEO, "Widescreen",
+          "Show the stage beyond the 256-column view. Adaptive fits the window.", R_PICK);
+  pick(r, kWidescreenLabels, 5, NULL, 0);
+#if defined(RECOMP_LAUNCHER)
+  row("video.frame_blend", T_VIDEO, "Frame blend",
+      "Blend consecutive frames (flicker transparency).", R_TOGGLE);
+  r = row("video.run_ahead", T_VIDEO, "Run-ahead",
+          "Frames of input latency to hide (0 = off).", R_SLIDER);
+  r->min = 0; r->max = 4; r->unit = "";
+  r = row("display.fullscreen", T_DISPLAY, "Fullscreen", "Window mode.", R_PICK);
+  pick(r, kFullscreenLabels, 3, NULL, 0);
+  r = row("display.scale", T_DISPLAY, "Window scale", "Window size in SNES pixels.", R_SLIDER);
+  r->min = 1; r->max = 10; r->unit = "x";
+  row("display.stretch", T_DISPLAY, "Stretch to window",
+      "Ignore the aspect ratio and fill the window.", R_TOGGLE);
+  row("display.linear", T_DISPLAY, "Linear filter",
+      "Smooth scaling. Off keeps sharp pixels.", R_TOGGLE);
+  r = row("audio.volume", T_AUDIO, "Volume", "Master volume.", R_SLIDER);
+  r->min = 0; r->max = 100; r->step = 5; r->unit = "%";
+  r = row("audio.rate", T_AUDIO, "Sample rate",
+          "Restarts on Apply and resumes where you are.", R_PICK);
+  pick(r, kAudioRateLabels, 4, kAudioRateValues, kAudioRateValues[0]);
+  r = row("controls.p1", T_CONTROLS, "Player 1 input", "Which device drives player 1.", R_PICK);
+  pick(r, kSourceLabels, 3, NULL, 0);
+  r = row("controls.p2", T_CONTROLS, "Player 2 input", "Which device drives player 2.", R_PICK);
+  pick(r, kSourceLabels, 3, NULL, 0);
+  r = row("controls.deadzone", T_CONTROLS, "Stick deadzone",
+          "How far the stick moves before it counts.", R_SLIDER);
+  r->min = 0; r->max = 50; r->step = 5; r->unit = "%";
+#endif
+  row("controls.background", T_CONTROLS, "Background input",
+      "Off: controller input is ignored while the window is not focused.", R_TOGGLE);
+#if defined(RECOMP_LAUNCHER)
+  row("controls.bindings", T_CONTROLS, "Keybinds & controller mapping",
+      "Opens the launcher's controls page; Play returns here.", R_ACTION);
+#endif
+  row("graphics.shader_preset", T_SHADERS, "Shader",
+      "Choose a preset: it previews live behind this panel, Apply keeps it.", R_SHADER);
+  row(NULL, T_SHADERS, "Shaders only work on the Vulkan and OpenGL renderers.",
+      NULL, R_NOTE);
+  r = row("system.slot", T_SYSTEM, "Save state slot", "The slot Save and Load use.", R_SLIDER);
+  r->min = 1; r->max = DC_STATE_SLOTS; r->unit = "";
+  row("system.save", T_SYSTEM, "Save state", "Save this moment to the selected slot.", R_ACTION);
+  row("system.load", T_SYSTEM, "Load state", "Return to the state in the selected slot.", R_ACTION);
+#if defined(RECOMP_LAUNCHER)
+  row("system.skip_launcher", T_SYSTEM, "Skip launcher at startup",
+      "Start straight into the game.", R_TOGGLE);
+#endif
+  row("system.resume", T_SYSTEM, "Resume", "Close this panel.", R_ACTION);
+  row("system.reset", T_SYSTEM, "Reset console", "Restart the game from power-on.", R_ACTION);
+  row("system.quit", T_SYSTEM, "Quit", "Close Demon's Crest.", R_ACTION);
+}
+
+/* Committed value of a row. */
+static int read_value(const Row *r) {
+  if (key_is(r, "graphics.motion")) return (int)DcInterp_GetMode();
+  if (key_is(r, "graphics.widescreen")) return DcWidescreenSetting_Get();
+  if (key_is(r, "graphics.shader_preset")) return g_current;
+  if (key_is(r, "controls.background")) return snesrecomp_desktop_background_input();
+  if (key_is(r, "system.slot")) return g_slot;
+#if defined(RECOMP_LAUNCHER)
+  RecompLauncherCSettings *s = ls();
+  if (key_is(r, "video.renderer")) return s->renderer;
+  if (key_is(r, "video.vsync")) return s->vsync >= 1 && s->vsync <= 3 ? s->vsync : 1;
+  if (key_is(r, "video.frame_blend")) return s->frame_blend != 0;
+  if (key_is(r, "video.run_ahead")) return s->run_ahead;
+  if (key_is(r, "display.fullscreen")) return s->fullscreen;
+  if (key_is(r, "display.scale")) return s->window_scale;
+  if (key_is(r, "display.stretch")) return s->ignore_aspect != 0;
+  if (key_is(r, "display.linear")) return s->linear_filter != 0;
+  if (key_is(r, "audio.volume")) return s->volume;
+  if (key_is(r, "audio.rate")) {
+    for (int i = 0; i < 4; i++) if (kAudioRateValues[i] == s->audio_freq) return s->audio_freq;
+    return kAudioRateValues[2];
+  }
+  if (key_is(r, "controls.p1")) return s->player_src[0];
+  if (key_is(r, "controls.p2")) return s->player_src[1];
+  if (key_is(r, "controls.deadzone")) return s->deadzone[0];
+  if (key_is(r, "system.skip_launcher")) return s->skip_launcher != 0;
+#endif
+  return 0;
+}
+
+static void seed_rows(void) {
+#if defined(RECOMP_LAUNCHER)
+  g_ls_valid = false;
+#endif
+  for (int i = 0; i < g_nrows; i++) {
+    g_rows[i].cur = read_value(&g_rows[i]);
+    g_rows[i].pend = g_rows[i].cur;
+  }
+}
+
+static int pending_count(void) {
+  int n = 0;
+  for (int i = 0; i < g_nrows; i++)
+    if (g_rows[i].type != R_ACTION && g_rows[i].type != R_NOTE && g_rows[i].pend != g_rows[i].cur) n++;
+  return n;
+}
+
+static void close_menu(bool revert);
+
+/* Apply: every edited row, the launcher's way. */
+static void apply_all(void) {
+  int changed = pending_count();
+  if (!changed) { status("Nothing to apply%s%s", "", ""); return; }
+  int shader_want = -1;
+  bool ls_dirty = false;
+#if defined(RECOMP_LAUNCHER)
+  RecompLauncherCSettings *s = ls();
+#endif
+  for (int i = 0; i < g_nrows; i++) {
+    Row *r = &g_rows[i];
+    if (r->type == R_ACTION || r->type == R_NOTE || r->pend == r->cur) continue;
+    int v = r->pend;
+    if (key_is(r, "graphics.shader_preset")) { shader_want = v; continue; }
+    if (key_is(r, "graphics.motion")) {
+      DcInterp_SetMode((DcMotionMode)v);
+      snesrecomp_desktop_request_clock_reset();
+      save_choice();
+    } else if (key_is(r, "graphics.widescreen")) {
+      if (!DcWidescreenSetting_Set(v))
+        fprintf(stderr, "[dc] widescreen: the mod state could not be saved\n");
+    } else if (key_is(r, "controls.background")) {
+      snesrecomp_desktop_set_background_input(v);
+    } else if (key_is(r, "system.slot")) {
+      g_slot = v;
+      save_choice();
+    }
+#if defined(RECOMP_LAUNCHER)
+    else {
+      ls_dirty = true;
+      if (key_is(r, "video.renderer")) s->renderer = v;
+      else if (key_is(r, "video.vsync")) s->vsync = v;
+      else if (key_is(r, "video.frame_blend")) s->frame_blend = v;
+      else if (key_is(r, "video.run_ahead")) s->run_ahead = v;
+      else if (key_is(r, "display.fullscreen")) s->fullscreen = v;
+      else if (key_is(r, "display.scale")) s->window_scale = v;
+      else if (key_is(r, "display.stretch")) s->ignore_aspect = v;
+      else if (key_is(r, "display.linear")) s->linear_filter = v;
+      else if (key_is(r, "audio.volume")) s->volume = v;
+      else if (key_is(r, "audio.rate")) s->audio_freq = v;
+      else if (key_is(r, "controls.p1")) s->player_src[0] = v;
+      else if (key_is(r, "controls.p2")) s->player_src[1] = v;
+      else if (key_is(r, "controls.deadzone")) s->deadzone[0] = s->deadzone[1] = v;
+      else if (key_is(r, "system.skip_launcher")) s->skip_launcher = v;
+    }
+#endif
+  }
+  int restart = 0;
+  if (shader_want >= 0) {
+    /* Saved first, so a restart below comes back with it. */
+    g_current = shader_want;
+    save_choice();
+  }
+#if defined(RECOMP_LAUNCHER)
+  if (ls_dirty) restart = ls_apply();
+#else
+  (void)ls_dirty;
+#endif
+  if (shader_want >= 0 && !restart) apply_shader(shader_want);
+  seed_rows();
+  if (restart) status("Applied: restarting (resumes where you are)%s%s", "", "");
+  else if (shader_want < 0 || shader_live_ok(shader_want)) {
+    char n[16];
+    snprintf(n, sizeof(n), "%d", changed);
+    status("Applied %s change%s", n, changed == 1 ? "" : "s");
+  }
+}
+
+/* ---- the panel ----------------------------------------------------------- */
+
+static bool g_open;
+static int g_tab;
+static int g_focus;            /* row index within the tab; == count: Apply */
+static bool g_list;            /* the shader list is up */
+static int g_list_sel, g_list_top;
+static double g_list_moved_at;
+static int g_confirm_row = -1;
+static double g_confirm_at;
+static int g_last_pad;         /* last input came from a controller */
+static float g_hl_y = -1, g_tab_x = -1, g_tab_w;  /* animated */
+static double g_opened_at;
+
+static int tab_rows(int tab, int *idx) {
+  int n = 0;
+  for (int i = 0; i < g_nrows; i++)
+    if (g_rows[i].tab == tab && g_rows[i].type != R_NOTE) { if (idx) idx[n] = i; n++; }
+  return n;
+}
+static Row *focused_row(void) {
+  int idx[DC_MAX_ROWS];
+  int n = tab_rows(g_tab, idx);
+  return g_focus < n ? &g_rows[idx[g_focus]] : NULL;
+}
+
+static void open_menu(void) {
+  if (g_open) return;
+  g_open = true;
+  g_list = false;
+  g_confirm_row = -1;
+  seed_rows();
+  g_preview = g_current;
+  g_hl_y = -1; g_tab_x = -1;
+  g_status[0] = 0;
+  g_opened_at = now_s();
+  g_dirty = 1;
+  fprintf(stderr, "[dc] options menu opened\n");
+}
+
+static void close_menu(bool revert) {
+  if (!g_open) return;
+  g_open = false;
+  g_list = false;
+  if (revert && g_preview != g_current && g_shader_waiting < 0) {
+    if (shader_live_ok(g_current)) run_shader(g_current, false);
+    g_preview = g_current;
+  }
+  fprintf(stderr, "[dc] options menu closed\n");
+}
+
+static int shader_row_index(void) {
+  for (int i = 0; i < g_nrows; i++) if (key_is(&g_rows[i], "graphics.shader_preset")) return i;
+  return -1;
+}
+
+static void run_action(Row *r) {
+  char n[16];
+  snprintf(n, sizeof(n), "%d", g_slot);
+  int ri = (int)(r - g_rows);
+  if (key_is(r, "system.resume")) { close_menu(true); return; }
+  if (key_is(r, "system.save")) {
+    snesrecomp_desktop_command(kKeys_Save + g_slot - 1);
+    status("Saved state to slot %s%s", n, "");
+    return;
+  }
+  if (key_is(r, "system.load")) {
+    char path[512];
+    struct stat st;
+    RtlSaveSlotPath(g_slot - 1, path, sizeof(path));
+    if (stat(path, &st) != 0) { status("Slot %s is empty%s", n, ""); return; }
+    snesrecomp_desktop_command(kKeys_Load + g_slot - 1);
+    fprintf(stderr, "[dc] options: loaded state slot %d\n", g_slot);
+    close_menu(true);
+    return;
+  }
+#if defined(RECOMP_LAUNCHER)
+  if (key_is(r, "controls.bindings")) {
+    close_menu(true);
+    snesrecomp_desktop_open_launcher();
+    return;
+  }
+#endif
+  if (key_is(r, "system.reset") || key_is(r, "system.quit")) {
+    bool quit = key_is(r, "system.quit");
+    if (g_confirm_row != ri || now_s() - g_confirm_at > 3.0) {
+      g_confirm_row = ri;
+      g_confirm_at = now_s();
+      status(quit ? "Press again to quit%s%s" : "Press again to reset the console%s%s", "", "");
+      return;
+    }
+    g_confirm_row = -1;
+    close_menu(true);
+    if (quit) {
+      SDL_Event e;
+      memset(&e, 0, sizeof(e));
+#if SNESRECOMP_SDL3
+      e.type = SDL_EVENT_QUIT;
+#else
+      e.type = SDL_QUIT;
+#endif
+      SDL_PushEvent(&e);
+    } else {
+      snesrecomp_desktop_command(kKeys_Reset);
+    }
+  }
+}
+
+static void step_value(Row *r, int dir, bool wrap) {
+  if (r->type == R_TOGGLE) { r->pend = !r->pend; return; }
+  if (r->type == R_PICK) {
+    int i = pick_index(r, r->pend) + dir;
+    if (i < 0) i = wrap ? r->nchoices - 1 : 0;
+    if (i >= r->nchoices) i = wrap ? 0 : r->nchoices - 1;
+    r->pend = pick_value(r, i);
+    return;
+  }
+  if (r->type == R_SLIDER) {
+    int v = r->pend + dir * r->step;
+    if (v < r->min) v = r->min;
+    if (v > r->max) v = r->max;
+    r->pend = v;
+    return;
+  }
+  if (r->type == R_SHADER) {
+    int v = r->pend + dir;
+    if (v < 0) v = (int)g_count - 1;
+    if (v >= (int)g_count) v = 0;
+    r->pend = v;
+    preview_shader(v);
+  }
+}
+
+typedef enum { IN_UP, IN_DOWN, IN_LEFT, IN_RIGHT, IN_OK, IN_BACK, IN_APPLY,
+               IN_TAB_PREV, IN_TAB_NEXT, IN_PAGE_UP, IN_PAGE_DOWN } MenuIn;
+
+static void list_move(int d) {
+  int v = g_list_sel + d;
+  if (v < 0) v = 0;
+  if (v >= (int)g_count) v = (int)g_count - 1;
+  if (v != g_list_sel) { g_list_sel = v; g_list_moved_at = now_s(); }
+}
+
+static void menu_input(MenuIn in) {
+  g_dirty = 1;
+  if (g_list) {
+    int si = shader_row_index();
+    switch (in) {
+    case IN_UP: list_move(-1); break;
+    case IN_DOWN: list_move(1); break;
+    case IN_LEFT: case IN_PAGE_UP: case IN_TAB_PREV: list_move(-10); break;
+    case IN_RIGHT: case IN_PAGE_DOWN: case IN_TAB_NEXT: list_move(10); break;
+    case IN_OK:
+      if (si >= 0) g_rows[si].pend = g_list_sel;
+      preview_shader(g_list_sel);
+      g_list = false;
+      break;
+    case IN_BACK:
+      g_list = false;
+      if (si >= 0 && shader_live_ok(g_rows[si].pend)) preview_shader(g_rows[si].pend);
+      break;
+    case IN_APPLY:
+      if (si >= 0) g_rows[si].pend = g_list_sel;
+      g_list = false;
+      apply_all();
+      break;
+    }
+    return;
+  }
+  int n = tab_rows(g_tab, NULL);
+  Row *r = focused_row();
+  switch (in) {
+  case IN_UP: g_focus = g_focus > 0 ? g_focus - 1 : n; break;
+  case IN_DOWN: g_focus = g_focus < n ? g_focus + 1 : 0; break;
+  case IN_TAB_PREV: g_tab = (g_tab + T_COUNT - 1) % T_COUNT; g_focus = 0; break;
+  case IN_TAB_NEXT: g_tab = (g_tab + 1) % T_COUNT; g_focus = 0; break;
+  case IN_PAGE_UP: g_focus = 0; break;
+  case IN_PAGE_DOWN: g_focus = n; break;
+  case IN_LEFT: if (r) step_value(r, -1, false); break;
+  case IN_RIGHT: if (r) step_value(r, 1, false); break;
+  case IN_OK:
+    if (!r) { apply_all(); break; }
+    if (r->type == R_ACTION) run_action(r);
+    else if (r->type == R_SHADER) {
+      g_list = true;
+      g_list_sel = r->pend;
+      g_list_top = -1;
+      g_list_moved_at = 0;
+    } else step_value(r, 1, true);
+    break;
+  case IN_BACK: close_menu(true); break;
+  case IN_APPLY: apply_all(); break;
+  }
+}
+
+/* ---- drawing ------------------------------------------------------------- */
+
+/* Demon's Crest: gothic purple with a crimson edge. */
+#define C_TEXT    0xFFF4EEF8u
+#define C_DIM     0xFFB3A6C0u
+#define C_FAINT   0x66FFFFFFu
+#define C_ACCENT  0xFF8E4DFFu
+#define C_ACCENT2 0xFFC23A5Au
+#define C_TINT    0xFF140B1Cu
+
+static uint32_t *g_layer;
+static size_t g_layer_cap;
+static int g_lw, g_lh, g_lx, g_ly;
+static int g_last_out_w, g_last_out_h;
+static uint32_t g_blur[64 * 64];
+static int g_blur_w, g_blur_h;
+static const uint32_t *g_blur_src;
+
+static void make_blur(const SnesModalLayerView *v) {
+  g_blur_w = g_blur_h = 0;
+  if (!v->frame || v->frame_w <= 0 || v->frame_h <= 0) return;
+  int bw = 48, bh = 42;
+  float acc[48 * 42][3];
+  for (int y = 0; y < bh; y++)
+    for (int x = 0; x < bw; x++) {
+      int x0 = x * v->frame_w / bw, x1 = (x + 1) * v->frame_w / bw;
+      int y0 = y * v->frame_h / bh, y1 = (y + 1) * v->frame_h / bh;
+      float r = 0, g = 0, b = 0;
+      int n = 0;
+      for (int yy = y0; yy < y1; yy += 2)
+        for (int xx = x0; xx < x1; xx += 2) {
+          uint32_t p = v->frame[(size_t)yy * v->frame_w + xx];
+          r += (p >> 16) & 255; g += (p >> 8) & 255; b += p & 255; n++;
+        }
+      if (!n) n = 1;
+      acc[y * bw + x][0] = r / n; acc[y * bw + x][1] = g / n; acc[y * bw + x][2] = b / n;
+    }
+  for (int pass = 0; pass < 2; pass++) {
+    static float tmp[48 * 42][3];
+    for (int y = 0; y < bh; y++)
+      for (int x = 0; x < bw; x++) {
+        float s[3] = {0, 0, 0};
+        int n = 0;
+        for (int dy = -2; dy <= 2; dy++)
+          for (int dx = -2; dx <= 2; dx++) {
+            int xx = x + dx, yy = y + dy;
+            if (xx < 0 || yy < 0 || xx >= bw || yy >= bh) continue;
+            for (int k = 0; k < 3; k++) s[k] += acc[yy * bw + xx][k];
+            n++;
+          }
+        for (int k = 0; k < 3; k++) tmp[y * bw + x][k] = s[k] / n;
+      }
+    memcpy(acc, tmp, sizeof(tmp));
+  }
+  for (int i = 0; i < bw * bh; i++)
+    g_blur[i] = 0xFF000000u | ((uint32_t)acc[i][0] << 16) | ((uint32_t)acc[i][1] << 8) |
+                (uint32_t)acc[i][2];
+  g_blur_w = bw;
+  g_blur_h = bh;
+}
+
+static uint32_t blur_at(const SnesModalLayerView *v, float sx, float sy) {
+  if (!g_blur_w || v->vp_w <= 0 || v->vp_h <= 0) return 0xFF000000u;
+  float u = (sx - v->vp_x) / v->vp_w * g_blur_w - .5f;
+  float t = (sy - v->vp_y) / v->vp_h * g_blur_h - .5f;
+  if (u < -1 || t < -1 || u > g_blur_w || t > g_blur_h) return 0xFF000000u;
+  if (u < 0) u = 0; if (t < 0) t = 0;
+  if (u > g_blur_w - 1) u = (float)g_blur_w - 1;
+  if (t > g_blur_h - 1) t = (float)g_blur_h - 1;
+  int x0 = (int)u, y0 = (int)t;
+  int x1 = x0 + 1 < g_blur_w ? x0 + 1 : x0, y1 = y0 + 1 < g_blur_h ? y0 + 1 : y0;
+  float fx = u - x0, fy = t - y0;
+  uint32_t a = rp_mix(g_blur[y0 * g_blur_w + x0], g_blur[y0 * g_blur_w + x1], fx);
+  uint32_t b = rp_mix(g_blur[y1 * g_blur_w + x0], g_blur[y1 * g_blur_w + x1], fx);
+  return rp_mix(a, b, fy);
+}
+
+/* The frosted panel body: the blurred game, darkened and tinted. */
+static void draw_glass(RpCanvas *c, const SnesModalLayerView *v, float rad) {
+  float hw = c->w / 2.f, hh = c->h / 2.f;
+  for (int y = 0; y < c->h; y++) {
+    uint32_t rowcol = 0;
+    int last_bx = -99;
+    for (int x = 0; x < c->w; x++) {
+      float fx = x + .5f, fy = y + .5f;
+      float qx = fabsf(fx - hw) - (hw - rad), qy = fabsf(fy - hh) - (hh - rad);
+      float d;
+      if (qx <= 0 || qy <= 0) d = (qx > qy ? qx : qy) - rad;
+      else d = sqrtf(qx * qx + qy * qy) - rad;
+      float cov = .5f - d;
+      if (cov <= 0) { c->px[(size_t)y * c->w + x] = 0; continue; }
+      if (cov > 1) cov = 1;
+      int bx = x / 6;
+      if (bx != last_bx) {
+        uint32_t g = blur_at(v, (float)(g_lx + x), (float)(g_ly + y));
+        rowcol = rp_mix(g, C_TINT, 0.74f);
+        last_bx = bx;
+      }
+      float a = 0.93f * cov;
+      uint32_t A = (uint32_t)(a * 255.f + .5f);
+      uint32_t r = (uint32_t)(((rowcol >> 16) & 255) * a), gg = (uint32_t)(((rowcol >> 8) & 255) * a),
+               b = (uint32_t)((rowcol & 255) * a);
+      c->px[(size_t)y * c->w + x] = (A << 24) | (r << 16) | (gg << 8) | b;
+    }
+  }
+  rp_stroke_rrect(c, .5f, .5f, c->w - 1.f, c->h - 1.f, rad, 1.2f, 0x30FFFFFFu);
+}
+
+/* Controller glyph style: 0 Xbox, 1 PlayStation, 2 Nintendo. */
+static int pad_style(void) {
+#if SNESRECOMP_SDL3
+  int n = 0;
+  SDL_JoystickID *ids = SDL_GetGamepads(&n);
+  int st = 0;
+  if (ids && n > 0) {
+    SDL_GamepadType t = SDL_GetGamepadTypeForID(ids[0]);
+    if (t == SDL_GAMEPAD_TYPE_PS3 || t == SDL_GAMEPAD_TYPE_PS4 || t == SDL_GAMEPAD_TYPE_PS5) st = 1;
+    else if (t == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO ||
+             t == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
+             t == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT ||
+             t == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR) st = 2;
+  }
+  SDL_free(ids);
+  return st;
+#else
+  return 0;
+#endif
+}
+
+enum { G_SOUTH, G_EAST, G_WEST, G_LB, G_RB };
+
+/* One face/shoulder button glyph; returns its width. */
+static float draw_glyph(RpCanvas *c, int style, int which, float x, float cy, float s) {
+  float r = 13 * s;
+  if (which == G_LB || which == G_RB) {
+    const char *t = style == 1 ? (which == G_LB ? "L1" : "R1")
+                  : style == 2 ? (which == G_LB ? "L" : "R") : (which == G_LB ? "LB" : "RB");
+    float w = rp_text_width(RP_BOLD, 14 * s, t) + 16 * s;
+    rp_fill_rrect(c, x, cy - r * .85f, w, r * 1.7f, 7 * s, 0xFF3A3346u);
+    rp_text_center(c, RP_BOLD, 14 * s, x, cy - r * .85f, w, r * 1.7f, t, C_TEXT);
+    return w;
+  }
+  float cx = x + r;
+  if (style == 1) {
+    rp_fill_circle(c, cx, cy, r, 0xFF2B2635u);
+    float k = r * .45f;
+    if (which == G_SOUTH) {
+      rp_line(c, cx - k, cy - k, cx + k, cy + k, 2.4f * s, 0xFF7FA8FFu);
+      rp_line(c, cx - k, cy + k, cx + k, cy - k, 2.4f * s, 0xFF7FA8FFu);
+    } else if (which == G_EAST) {
+      rp_stroke_circle(c, cx, cy, k * 1.1f, 2.4f * s, 0xFFFF6F7Fu);
+    } else {
+      rp_stroke_rrect(c, cx - k, cy - k, 2 * k, 2 * k, 1.5f * s, 2.4f * s, 0xFFF59BD8u);
+    }
+    return 2 * r;
+  }
+  const char *t;
+  uint32_t col;
+  if (style == 2) {   /* Nintendo labels by position */
+    t = which == G_SOUTH ? "B" : which == G_EAST ? "A" : "Y";
+    col = 0xFF5A5466u;
+  } else {
+    t = which == G_SOUTH ? "A" : which == G_EAST ? "B" : "X";
+    col = which == G_SOUTH ? 0xFF3FA34Du : which == G_EAST ? 0xFFD0433Fu : 0xFF3B76D6u;
+  }
+  rp_fill_circle(c, cx, cy, r, col);
+  rp_text_center(c, RP_BOLD, 15 * s, cx - r, cy - r, 2 * r, 2 * r, t, 0xFFFFFFFFu);
+  return 2 * r;
+}
+
+static float draw_keycap(RpCanvas *c, const char *t, float x, float cy, float s) {
+  float h = 24 * s;
+  float w = rp_text_width(RP_BOLD, 13 * s, t) + 14 * s;
+  if (w < h) w = h;
+  rp_fill_rrect(c, x, cy - h / 2, w, h, 6 * s, 0xFF3A3346u);
+  rp_stroke_rrect(c, x, cy - h / 2, w, h, 6 * s, 1.f, 0x40FFFFFFu);
+  rp_text_center(c, RP_BOLD, 13 * s, x, cy - h / 2, w, h, t, C_TEXT);
+  return w;
+}
+
+static void draw_hints(RpCanvas *c, float x, float y, float w, float h, float s) {
+  rp_fill_rrect(c, x, y, w, h, 12 * s, 0x50000000u);
+  float cy = y + h / 2, gap = 8 * s, sep = 18 * s, fs = 16 * s;
+  struct { int g; const char *k; const char *k2; const char *label; } it[4] = {
+    {G_SOUTH, "Enter", NULL, "Select"},
+    {G_EAST, "Esc", NULL, "Back"},
+    {G_WEST, "F5", NULL, "Apply"},
+    {G_LB, "Q", "E", "Tab"},
+  };
+  int style = pad_style();
+  /* Measure, then scale down to fit. */
+  float total = 0;
+  float widths[4];
+  for (int pass = 0; pass < 2; pass++) {
+    RpCanvas dummy = *c;
+    dummy.cx0 = dummy.cy0 = 0; dummy.cx1 = dummy.cy1 = 0;  /* draw nothing */
+    RpCanvas *dc = pass == 0 ? &dummy : c;
+    float px = pass == 0 ? 0 : x + (w - total) / 2;
+    for (int i = 0; i < 4; i++) {
+      float start = px;
+      if (g_last_pad) {
+        px += draw_glyph(dc, style, it[i].g, px, cy, s);
+        if (it[i].g == G_LB) px += 4 * s + draw_glyph(dc, style, G_RB, px + 4 * s, cy, s);
+      } else {
+        px += draw_keycap(dc, it[i].k, px, cy, s);
+        if (it[i].k2) px += 4 * s + draw_keycap(dc, it[i].k2, px + 4 * s, cy, s);
+      }
+      px += gap;
+      px += rp_text(dc, RP_REGULAR, fs, px, cy - fs / 2, it[i].label, C_DIM, 0);
+      widths[i] = px - start;
+      if (i < 3) px += sep;
+    }
+    if (pass == 0) total = px;
+  }
+  (void)widths;
+}
+
+static void wrap_text(RpCanvas *c, int font, float size, float x, float y, float w,
+                      int max_lines, const char *s, uint32_t col) {
+  char line[256];
+  const char *p = s;
+  for (int ln = 0; ln < max_lines && *p; ln++) {
+    const char *best = NULL, *q = p;
+    while (1) {
+      const char *sp = strchr(q, ' ');
+      const char *end = sp ? sp : q + strlen(q);
+      size_t len = (size_t)(end - p);
+      if (len >= sizeof(line)) len = sizeof(line) - 1;
+      memcpy(line, p, len);
+      line[len] = 0;
+      if (rp_text_width(font, size, line) > w && best) break;
+      best = end;
+      if (!sp) break;
+      q = sp + 1;
+    }
+    size_t len = (size_t)(best - p);
+    if (len >= sizeof(line)) len = sizeof(line) - 1;
+    memcpy(line, p, len);
+    line[len] = 0;
+    bool last = ln == max_lines - 1 && *best;
+    rp_text(c, font, size, x, y + ln * size * 1.3f, last ? p : line, col, w);
+    p = *best ? best + 1 : best;
+  }
+}
+
+static float approach(float cur, float target, float k) {
+  if (cur < 0) return target;
+  float d = target - cur;
+  if (fabsf(d) < .5f) return target;
+  return cur + d * k;
+}
+
+static bool g_animating;
+
+static void draw_toggle(RpCanvas *c, float x, float cy, float s, int on, bool changed) {
+  float w = 50 * s, h = 28 * s;
+  rp_fill_rrect(c, x, cy - h / 2, w, h, h / 2, on ? C_ACCENT : 0x40FFFFFFu);
+  if (changed) rp_stroke_rrect(c, x - 2 * s, cy - h / 2 - 2 * s, w + 4 * s, h + 4 * s, h / 2 + 2 * s, 1.5f * s, C_ACCENT2);
+  float kr = h / 2 - 3.5f * s;
+  rp_fill_circle(c, on ? x + w - h / 2 : x + h / 2, cy, kr, 0xFFFFFFFFu);
+}
+
+static void draw_row(RpCanvas *c, Row *r, float x, float y, float w, float h, float s,
+                     bool focus) {
+  float fs = 21 * s;
+  float ty = y + (h - fs) / 2;
+  float cy = y + h / 2;
+  bool changed = r->type != R_ACTION && r->pend != r->cur;
+  uint32_t lc = focus ? C_TEXT : 0xFFE0D8E8u;
+  float right = x + w;
+  float vw = 0;   /* width taken by the value on the right */
+  char buf[64];
+  if (r->type == R_TOGGLE) {
+    vw = 50 * s;
+    draw_toggle(c, right - vw, cy, s, r->pend, changed);
+  } else if (r->type == R_SLIDER) {
+    float tw = w * .30f;
+    if (tw > 180 * s) tw = 180 * s;
+    snprintf(buf, sizeof(buf), "%d%s", r->pend, r->unit ? r->unit : "");
+    float nw = 52 * s;
+    float tx = right - tw;
+    float frac = r->max > r->min ? (float)(r->pend - r->min) / (r->max - r->min) : 0;
+    rp_fill_rrect(c, tx, cy - 3 * s, tw, 6 * s, 3 * s, 0x40FFFFFFu);
+    rp_fill_rrect(c, tx, cy - 3 * s, tw * frac > 6 * s ? tw * frac : 6 * s, 6 * s, 3 * s, C_ACCENT);
+    rp_fill_circle(c, tx + tw * frac, cy, 9 * s, focus ? 0xFFFFFFFFu : 0xFFE6DDF2u);
+    float numw = rp_text_width(RP_BOLD, fs * .9f, buf);
+    rp_text(c, RP_BOLD, fs * .9f, tx - 14 * s - numw, y + (h - fs * .9f) / 2, buf,
+            changed ? C_ACCENT2 : C_DIM, 0);
+    vw = tw + 14 * s + (numw > nw ? numw : nw);
+  } else if (r->type == R_PICK || r->type == R_SHADER) {
+    const char *v;
+    if (r->type == R_SHADER) v = r->pend >= 0 && (size_t)r->pend < g_count ? g_labels[r->pend] : "Off";
+    else v = r->choices[pick_index(r, r->pend)];
+    float maxv = w * .52f;
+    float aw = 16 * s;
+    float tw = rp_text_width(RP_BOLD, fs * .95f, v);
+    if (tw > maxv) tw = maxv;
+    uint32_t vc = changed ? 0xFFE7A1FFu : (focus ? C_TEXT : C_DIM);
+    if (r->type == R_SHADER) {
+      rp_text(c, RP_BOLD, fs * .95f, right - aw - tw - 6 * s, y + (h - fs * .95f) / 2, v, vc, maxv);
+      float ax = right - aw * .6f;
+      rp_line(c, ax - 5 * s, cy - 7 * s, ax + 2 * s, cy, 2.2f * s, focus ? C_ACCENT : C_DIM);
+      rp_line(c, ax + 2 * s, cy, ax - 5 * s, cy + 7 * s, 2.2f * s, focus ? C_ACCENT : C_DIM);
+      vw = aw + tw + 6 * s;
+    } else {
+      uint32_t ac = focus ? C_ACCENT : 0x50FFFFFFu;
+      float ax = right - aw * .5f;
+      rp_line(c, ax - 3 * s, cy - 6 * s, ax + 3 * s, cy, 2.2f * s, ac);
+      rp_line(c, ax + 3 * s, cy, ax - 3 * s, cy + 6 * s, 2.2f * s, ac);
+      float vx = right - aw - 6 * s - tw;
+      rp_text(c, RP_BOLD, fs * .95f, vx, y + (h - fs * .95f) / 2, v, vc, maxv);
+      float lx = vx - 6 * s - aw * .5f;
+      rp_line(c, lx + 3 * s, cy - 6 * s, lx - 3 * s, cy, 2.2f * s, ac);
+      rp_line(c, lx - 3 * s, cy, lx + 3 * s, cy + 6 * s, 2.2f * s, ac);
+      vw = aw * 2 + tw + 12 * s;
+    }
+  } else if (r->type == R_ACTION) {
+    float ax = right - 10 * s;
+    if (g_confirm_row == (int)(r - g_rows) && now_s() - g_confirm_at < 3.0) {
+      const char *t = "Press again";
+      float tw = rp_text_width(RP_BOLD, fs * .85f, t);
+      rp_text(c, RP_BOLD, fs * .85f, right - tw, y + (h - fs * .85f) / 2, t, C_ACCENT2, 0);
+      vw = tw;
+    } else {
+      rp_line(c, ax - 5 * s, cy - 7 * s, ax + 2 * s, cy, 2.2f * s, focus ? C_ACCENT : 0x50FFFFFFu);
+      rp_line(c, ax + 2 * s, cy, ax - 5 * s, cy + 7 * s, 2.2f * s, focus ? C_ACCENT : 0x50FFFFFFu);
+      vw = 16 * s;
+    }
+  }
+  float lw = w - vw - 14 * s;
+  rp_text(c, focus ? RP_BOLD : RP_REGULAR, fs, x, ty, r->label, lc, lw > 20 * s ? lw : 20 * s);
+}
+
+static void render_panel(const SnesModalLayerView *v) {
+  /* Scale with the window height (readable on a TV), and keep the panel to
+   * about half the width on narrow windows. */
+  float s = v->out_h / 920.f;
+  if (640 * s > v->out_w * .56f) s = v->out_w * .56f / 640.f;
+  if (s < .42f) s = .42f;
+  float margin = 24 * s;
+  int pw = (int)(640 * s), ph = (int)(v->out_h - 2 * margin);
+  if (pw > v->out_w - 2 * (int)margin) pw = v->out_w - 2 * (int)margin;
+  if (pw < 60) pw = 60;
+  if (ph < 60) ph = 60;
+  size_t need = (size_t)pw * ph;
+  if (need > g_layer_cap) {
+    free(g_layer);
+    g_layer = (uint32_t *)malloc(need * 4);
+    g_layer_cap = g_layer ? need : 0;
+  }
+  if (!g_layer) return;
+  g_lw = pw; g_lh = ph;
+  g_lx = v->out_w - (int)margin - pw;
+  g_ly = (int)margin;
+  RpCanvas cv = {g_layer, pw, ph, 0, 0, pw, ph};
+  RpCanvas *c = &cv;
+  float rad = 26 * s;
+  draw_glass(c, v, rad);
+  g_animating = false;
+
+  float pad = 28 * s;
+  float x = pad, w = pw - 2 * pad;
+  float y = pad - 4 * s;
+  /* Header */
+  rp_text(c, RP_BOLD, 40 * s, x, y, "Options", C_TEXT, w * .6f);
+  {
+    const char *game = "DEMON'S CREST";
+    float gs = 14 * s;
+    float gw = rp_text_width(RP_BOLD, gs, game);
+    rp_text(c, RP_BOLD, gs, x + w - gw, y + 16 * s, game, C_ACCENT2, w * .38f);
+  }
+  y += 50 * s;
+  {
+    bool live = DcLibra_Backend() != DC_LIBRA_NONE || OpenGLRenderer_IsActive();
+    rp_fill_circle(c, x + 5 * s, y + 9 * s, 4.5f * s, live ? 0xFF5BE08Au : 0xFFE0B45Bu);
+    char line[200];
+    const char *rn = renderer_now();
+    snprintf(line, sizeof(line), "Live preview%s%s", rn ? "  \xC2\xB7  " : "", rn ? rn : "");
+    rp_text(c, RP_REGULAR, 17 * s, x + 16 * s, y, line, C_DIM, w - 16 * s);
+  }
+  y += 34 * s;
+  /* Tabs */
+  float th = 44 * s;
+  rp_fill_rrect(c, x, y, w, th, 12 * s, 0x38000000u);
+  float tabw = w / T_COUNT;
+  float tfs = 17 * s;
+  for (int i = 0; i < T_COUNT; i++) {
+    float need_w = rp_text_width(RP_BOLD, tfs, kTabNames[i]);
+    if (need_w > tabw - 8 * s) tfs = tfs * (tabw - 8 * s) / need_w;
+  }
+  float target = x + tabw * g_tab;
+  g_tab_x = approach(g_tab_x, target, .38f);
+  if (g_tab_x != target) g_animating = true;
+  rp_fill_rrect(c, g_tab_x + 3 * s, y + 3 * s, tabw - 6 * s, th - 6 * s, 10 * s,
+                g_list ? 0x60FFFFFFu & 0x40FFFFFF : rp_alpha(C_ACCENT, .85f));
+  for (int i = 0; i < T_COUNT; i++)
+    rp_text_center(c, i == g_tab ? RP_BOLD : RP_REGULAR, tfs, x + tabw * i, y, tabw, th,
+                   kTabNames[i], i == g_tab ? 0xFFFFFFFFu : C_DIM);
+  y += th + 18 * s;
+
+  /* Footer layout from the bottom up. */
+  float hint_h = 46 * s;
+  float hint_y = ph - pad - hint_h + 6 * s;
+  float ab_h = 56 * s;
+  float ab_y = hint_y - 14 * s - ab_h;
+  float desc_fs = 16 * s;
+  float desc_h = desc_fs * 1.3f * 2 + desc_fs * 1.3f;   /* 2 lines + status */
+  float desc_y = ab_y - 12 * s - desc_h;
+  float rows_top = y, rows_bot = desc_y - 8 * s;
+  float rh = 56 * s;
+
+  if (g_list) {
+    /* Shader list */
+    int vis = (int)((rows_bot - rows_top) / (rh * .78f));
+    if (vis < 1) vis = 1;
+    float lh = (rows_bot - rows_top) / vis;
+    if (g_list_top < 0) g_list_top = g_list_sel - vis / 2;
+    if (g_list_sel < g_list_top) g_list_top = g_list_sel;
+    if (g_list_sel >= g_list_top + vis) g_list_top = g_list_sel - vis + 1;
+    if (g_list_top > (int)g_count - vis) g_list_top = (int)g_count - vis;
+    if (g_list_top < 0) g_list_top = 0;
+    int si = shader_row_index();
+    rp_canvas_clip(c, 0, (int)rows_top, pw, (int)rows_bot);
+    for (int i = 0; i < vis && g_list_top + i < (int)g_count; i++) {
+      int k = g_list_top + i;
+      float ry = rows_top + i * lh;
+      bool f = k == g_list_sel;
+      if (f) rp_fill_rrect(c, x - 10 * s, ry + 2 * s, w + 20 * s, lh - 4 * s, 12 * s, rp_alpha(C_ACCENT, .30f));
+      bool chosen = si >= 0 && g_rows[si].pend == k;
+      bool live = k == g_preview;
+      float fsz = 19 * s;
+      const char *lab = g_labels[k];
+      rp_text(c, f ? RP_BOLD : RP_REGULAR, fsz, x + 4 * s, ry + (lh - fsz) / 2, lab,
+              f ? C_TEXT : (shader_live_ok(k) ? 0xFFDCD3E6u : 0xFF8A8094u), w - 80 * s);
+      if (chosen) rp_fill_circle(c, x + w - 10 * s, ry + lh / 2, 5 * s, C_ACCENT2);
+      if (live && !chosen) rp_stroke_circle(c, x + w - 10 * s, ry + lh / 2, 5 * s, 1.5f * s, C_ACCENT);
+    }
+    rp_canvas_noclip(c);
+    /* scrollbar */
+    if ((int)g_count > vis) {
+      float sh = (rows_bot - rows_top);
+      float bh = sh * vis / g_count;
+      if (bh < 20 * s) bh = 20 * s;
+      float by = rows_top + (sh - bh) * g_list_top / (float)((int)g_count - vis);
+      rp_fill_rrect(c, x + w + 12 * s, by, 4 * s, bh, 2 * s, 0x60FFFFFFu);
+    }
+    char d[200];
+    snprintf(d, sizeof(d), "%d of %zu presets. Highlight to preview, A/Enter picks, "
+             "Left/Right pages.", g_list_sel, g_count - 1);
+    wrap_text(c, RP_REGULAR, desc_fs, x, desc_y, w, 2, d, C_DIM);
+  } else {
+    int idx[DC_MAX_ROWS];
+    int n = tab_rows(g_tab, idx);
+    if (g_focus > n) g_focus = n;
+    /* Rows (+ a note) scroll to keep the focus in view. */
+    float avail = rows_bot - rows_top;
+    int vis = (int)(avail / rh);
+    if (vis < 1) vis = 1;
+    static int top;
+    int f = g_focus < n ? g_focus : n - 1;
+    if (f < top) top = f;
+    if (f >= top + vis) top = f - vis + 1;
+    if (top > n - vis) top = n - vis;
+    if (top < 0) top = 0;
+    rp_canvas_clip(c, 0, (int)rows_top, pw, (int)rows_bot);
+    if (g_focus < n) {
+      float target_y = rows_top + (g_focus - top) * rh;
+      g_hl_y = approach(g_hl_y, target_y, .40f);
+      if (g_hl_y != target_y) g_animating = true;
+      rp_fill_rrect(c, x - 12 * s, g_hl_y + 3 * s, w + 24 * s, rh - 6 * s, 14 * s, rp_alpha(C_ACCENT, .26f));
+      rp_fill_rrect(c, x - 12 * s, g_hl_y + 14 * s, 4 * s, rh - 28 * s, 2 * s, C_ACCENT2);
+    } else {
+      g_hl_y = -1;
+    }
+    float ry = rows_top;
+    for (int i = top; i < n && i < top + vis; i++, ry += rh) {
+      Row *r = &g_rows[idx[i]];
+      draw_row(c, r, x + 4 * s, ry, w - 8 * s, rh, s, i == g_focus);
+      if (i + 1 < n && i + 1 < top + vis && i + 1 != g_focus && i != g_focus)
+        rp_fill_rrect(c, x, ry + rh - .5f * s, w, 1.f, 0, 0x14FFFFFFu);
+    }
+    /* Tab notes below the rows */
+    for (int i = 0; i < g_nrows; i++)
+      if (g_rows[i].tab == g_tab && g_rows[i].type == R_NOTE && ry + rh <= rows_bot + 1) {
+        rp_fill_rrect(c, x, ry + 8 * s, w, rh - 16 * s, 10 * s, rp_alpha(C_ACCENT2, .16f));
+        rp_text(c, RP_REGULAR, 16 * s, x + 12 * s, ry + (rh - 16 * s) / 2, g_rows[i].label, 0xFFF0C9D2u, w - 24 * s);
+        ry += rh;
+      }
+    rp_canvas_noclip(c);
+    if (n > vis) {
+      float sh = avail;
+      float bh = sh * vis / n;
+      float by = rows_top + (sh - bh) * top / (float)(n - vis);
+      rp_fill_rrect(c, x + w + 12 * s, by, 4 * s, bh, 2 * s, 0x60FFFFFFu);
+    }
+    Row *fr = focused_row();
+    const char *d = fr && fr->desc ? fr->desc
+                  : pending_count() ? "Apply keeps your changes. Back discards them."
+                                    : "Everything is applied.";
+    wrap_text(c, RP_REGULAR, desc_fs, x, desc_y, w, 2, d, C_DIM);
+  }
+  /* Status line */
+  {
+    char st[300];
+    int pc = pending_count();
+    if (g_status[0] && now_s() - g_status_at < 6.0) snprintf(st, sizeof(st), "%s", g_status);
+    else if (pc) snprintf(st, sizeof(st), "%d change%s not applied", pc, pc == 1 ? "" : "s");
+    else st[0] = 0;
+    if (st[0]) rp_text(c, RP_BOLD, desc_fs, x, desc_y + desc_fs * 1.3f * 2, st,
+                       pc && !(g_status[0] && now_s() - g_status_at < 6.0) ? 0xFFE7A1FFu : 0xFFF0C9D2u, w);
+  }
+  /* Apply */
+  {
+    int idxn = tab_rows(g_tab, NULL);
+    bool f = !g_list && g_focus == idxn;
+    int pc = pending_count();
+    uint32_t col = pc ? C_ACCENT : rp_alpha(C_ACCENT, .45f);
+    if (f) col = rp_mix(col, 0xFFFFFFFFu, .12f);
+    rp_fill_rrect(c, x, ab_y, w, ab_h, 14 * s, col);
+    if (f) rp_stroke_rrect(c, x - 3 * s, ab_y - 3 * s, w + 6 * s, ab_h + 6 * s, 16 * s, 2 * s, 0xE0FFFFFFu);
+    char t[32];
+    if (pc) snprintf(t, sizeof(t), "Apply (%d)", pc);
+    else snprintf(t, sizeof(t), "Apply");
+    rp_text_center(c, RP_BOLD, 22 * s, x, ab_y, w, ab_h, t, 0xFFFFFFFFu);
+  }
+  draw_hints(c, x, hint_y, w, hint_h, s);
+  rp_finish(c);
+}
+
+/* ---- host entry points --------------------------------------------------- */
+
+static bool g_initialized;
+
 void DcOptions_Init(void) {
   if (g_initialized) return;
   g_initialized = true;
@@ -742,23 +1395,7 @@ void DcOptions_Init(void) {
   fprintf(stderr, "[dc] %zu shader presets; startup shader=%s motion=%s slot=%d\n",
           g_count - 1, g_current ? g_ids[g_current] : "Off",
           kMotionKeys[DcInterp_GetMode()], g_slot);
-  describe_slot();
-  snprintf(g_shader_desc, sizeof(g_shader_desc), "%s", DC_SHADER_NOTE);
-  build_items();
-
-  static RecompRuntimeUiConfig cfg;
-  memset(&cfg, 0, sizeof(cfg));
-  cfg.title = "Options";
-  cfg.subtitle = "Demon's Crest";
-  cfg.items = g_items;
-  cfg.item_count = g_item_count;
-  cfg.theme = "snes";
-  cfg.callbacks.get_value = ui_get;
-  cfg.callbacks.set_value = ui_set;
-  cfg.callbacks.run_action = ui_action;
-  cfg.callbacks.is_enabled = ui_enabled;
-  cfg.callbacks.visibility_changed = ui_visibility;
-  g_ui = recomp_runtime_ui_create(&cfg);
+  build_rows();
 }
 
 void DcOptions_AfterConfig(void) {
@@ -775,73 +1412,96 @@ void DcOptions_AfterConfig(void) {
     DcLibra_SetPreset(g_paths[g_current]);
     g_shader_waiting = g_current;
   }
+  g_preview = g_current;
 }
 
-static void toggle(void) {
-  if (!g_ui) return;
-  if (recomp_runtime_ui_is_open(g_ui)) recomp_runtime_ui_close(g_ui);
-  else recomp_runtime_ui_open(g_ui);
-  fprintf(stderr, "[dc] options menu %s\n",
-          recomp_runtime_ui_is_open(g_ui) ? "opened" : "closed");
-}
-
-static int feed(RecompRuntimeUiInput in, int pressed, int repeat) {
-  if (in == RECOMP_RUNTIME_UI_INPUT_ACCEPT) g_accepting = true;
-  recomp_runtime_ui_handle_input(g_ui, in, pressed, repeat);
-  g_accepting = false;
+static int feed(MenuIn in, int pressed) {
+  if (pressed) menu_input(in);
   return 1;
 }
 
 int DcOptions_OnKey(int key, int mod, int pressed, int repeat) {
   DcOptions_Init();
-  if (!g_ui) return 0;
-  /* Plain F12 opens the menu. Shift+F12 stays the host's Rewind. Escape
-   * toggles it too: in DC's single-player loop Escape had no binding. */
-  if ((key == SDLK_F12 || key == SDLK_ESCAPE) &&
-      !(mod & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT))) {
-    if (pressed && !repeat) toggle();
+  (void)repeat;
+  bool plain = !(mod & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT));
+  /* Plain F12 toggles the panel. Shift+F12 stays the host's Rewind. Escape
+   * opens it too, and inside it goes back (closing at the top level). */
+  if (key == SDLK_F12 && plain) {
+    if (pressed && !repeat) { g_last_pad = 0; if (g_open) close_menu(true); else open_menu(); }
     return 1;
   }
-  if (!recomp_runtime_ui_is_open(g_ui)) return 0;
+  if (key == SDLK_ESCAPE && plain) {
+    if (pressed && !repeat) {
+      g_last_pad = 0;
+      if (!g_open) open_menu();
+      else menu_input(IN_BACK);
+      g_dirty = 1;
+    }
+    return 1;
+  }
+  if (!g_open) return 0;   /* gameplay keys untouched while closed */
+  if (pressed) { g_last_pad = 0; g_dirty = 1; }
   switch (key) {
-  case SDLK_UP: return feed(RECOMP_RUNTIME_UI_INPUT_UP, pressed, repeat);
-  case SDLK_DOWN: return feed(RECOMP_RUNTIME_UI_INPUT_DOWN, pressed, repeat);
-  case SDLK_LEFT: return feed(RECOMP_RUNTIME_UI_INPUT_LEFT, pressed, repeat);
-  case SDLK_RIGHT: return feed(RECOMP_RUNTIME_UI_INPUT_RIGHT, pressed, repeat);
-  case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_SPACE:
-    return feed(RECOMP_RUNTIME_UI_INPUT_ACCEPT, pressed, repeat);
-  case SDLK_BACKSPACE:
-    return feed(RECOMP_RUNTIME_UI_INPUT_BACK, pressed, repeat);
+  case SDLK_UP: return feed(IN_UP, pressed);
+  case SDLK_DOWN: return feed(IN_DOWN, pressed);
+  case SDLK_LEFT: return feed(IN_LEFT, pressed);
+  case SDLK_RIGHT: return feed(IN_RIGHT, pressed);
+  case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_SPACE: return feed(IN_OK, pressed);
+  case SDLK_BACKSPACE: return feed(IN_BACK, pressed);
+  case SDLK_F5: return feed(IN_APPLY, pressed);
+  case SDLK_Q: return feed(IN_TAB_PREV, pressed);
+  case SDLK_E: return feed(IN_TAB_NEXT, pressed);
+  case SDLK_TAB: return feed((mod & KMOD_SHIFT) ? IN_TAB_PREV : IN_TAB_NEXT, pressed);
+  case SDLK_PAGEUP: return feed(IN_PAGE_UP, pressed);
+  case SDLK_PAGEDOWN: return feed(IN_PAGE_DOWN, pressed);
   default: return 1; /* swallow everything else while open */
   }
 }
 
+/* Held d-pad auto-repeat (controllers send no repeats). */
+static int g_held = -1;
+static double g_held_next;
+
 int DcOptions_OnGamepadButton(int b, int pressed) {
   DcOptions_Init();
-  if (!g_ui) return 0;
   if (b == SDL_CONTROLLER_BUTTON_GUIDE) {
-    if (pressed) toggle();
+    if (pressed) { g_last_pad = 1; if (g_open) close_menu(true); else open_menu(); }
     return 1;
   }
-  if (!recomp_runtime_ui_is_open(g_ui)) return 0;
+  /* Closed: every button goes to the game exactly as before. */
+  if (!g_open) return 0;
+  if (pressed) { g_last_pad = 1; g_dirty = 1; }
+  MenuIn in;
   switch (b) {
-  case SDL_CONTROLLER_BUTTON_DPAD_UP: return feed(RECOMP_RUNTIME_UI_INPUT_UP, pressed, 0);
-  case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return feed(RECOMP_RUNTIME_UI_INPUT_DOWN, pressed, 0);
-  case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return feed(RECOMP_RUNTIME_UI_INPUT_LEFT, pressed, 0);
-  case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return feed(RECOMP_RUNTIME_UI_INPUT_RIGHT, pressed, 0);
-  case SDL_CONTROLLER_BUTTON_A: return feed(RECOMP_RUNTIME_UI_INPUT_ACCEPT, pressed, 0);
-  case SDL_CONTROLLER_BUTTON_B: return feed(RECOMP_RUNTIME_UI_INPUT_BACK, pressed, 0);
-  case SDL_CONTROLLER_BUTTON_START: return feed(RECOMP_RUNTIME_UI_INPUT_TOGGLE, pressed, 0);
-  default: return 1;
+  case SDL_CONTROLLER_BUTTON_DPAD_UP: in = IN_UP; break;
+  case SDL_CONTROLLER_BUTTON_DPAD_DOWN: in = IN_DOWN; break;
+  case SDL_CONTROLLER_BUTTON_DPAD_LEFT: in = IN_LEFT; break;
+  case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: in = IN_RIGHT; break;
+  case SDL_CONTROLLER_BUTTON_A: in = IN_OK; break;
+  case SDL_CONTROLLER_BUTTON_B: in = IN_BACK; break;
+  case SDL_CONTROLLER_BUTTON_X: in = IN_APPLY; break;
+  case SDL_CONTROLLER_BUTTON_START: in = IN_APPLY; break;
+  case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: in = IN_TAB_PREV; break;
+  case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: in = IN_TAB_NEXT; break;
+  default: return 1;   /* swallowed while open */
   }
+  if (in <= IN_RIGHT) {
+    if (pressed) { g_held = (int)in; g_held_next = now_s() + 0.38; }
+    else if (g_held == (int)in) g_held = -1;
+  }
+  return feed(in, pressed);
 }
 
 /* Test hooks (headless, no input device):
  *   DC_OPTIONS_OPEN_AT=<sim frame>  open the menu at that frame
  *   DC_OPTIONS_CLOSE_AFTER=<n>      close it again after n modal presents
- *   DC_OPTIONS_SELECT=<id>          while open, apply that shader preset */
+ *   DC_OPTIONS_SELECT=<id>          while open, apply that shader preset
+ *   DC_OPTIONS_KEYS=<list>          while open, feed menu inputs, one per
+ *                                   10 presents: u d l r o(k) b(ack) a(pply)
+ *                                   [ ] (tabs) L (open list)  P (pad hints) */
 static long g_close_after = -1;
 static long g_modal_presents;
+static const char *g_test_keys;
 
 void DcOptions_OnSimFrame(unsigned number) {
   static long open_at = -2;
@@ -850,9 +1510,10 @@ void DcOptions_OnSimFrame(unsigned number) {
     open_at = e && *e ? atol(e) : -1;
     const char *c = getenv("DC_OPTIONS_CLOSE_AFTER");
     g_close_after = c && *c ? atol(c) : -1;
+    g_test_keys = getenv("DC_OPTIONS_KEYS");
   }
-  if (open_at >= 0 && (long)number == open_at && g_ui && !recomp_runtime_ui_is_open(g_ui)) {
-    recomp_runtime_ui_open(g_ui);
+  if (open_at >= 0 && (long)number == open_at && !g_open) {
+    open_menu();
     g_modal_presents = 0;
     const char *sel = getenv("DC_OPTIONS_SELECT");
     int i = sel ? find_id(sel) : -1;
@@ -862,16 +1523,80 @@ void DcOptions_OnSimFrame(unsigned number) {
 
 int DcOptions_ModalActive(void) {
   poll_shader();
-  if (!g_ui || !recomp_runtime_ui_is_open(g_ui)) return 0;
+  if (!g_open) return 0;
   if (g_close_after >= 0 && g_modal_presents >= g_close_after) {
-    recomp_runtime_ui_close(g_ui);
+    close_menu(true);
     return 0;
+  }
+  double t = now_s();
+  if (g_held >= 0 && t >= g_held_next) {
+    menu_input((MenuIn)g_held);
+    g_held_next = t + 0.085;
+  }
+  /* The shader list previews the highlighted preset once it rests. */
+  if (g_list && g_list_moved_at > 0 && t - g_list_moved_at > 0.35) {
+    g_list_moved_at = 0;
+    preview_shader(g_list_sel);
+  }
+  if (g_test_keys && *g_test_keys && g_modal_presents > 0 && g_modal_presents % 10 == 0) {
+    static long done = -1;
+    if (done != g_modal_presents) {
+      done = g_modal_presents;
+      char k = *g_test_keys++;
+      static const char *map = "udlrobaq[]";
+      (void)map;
+      switch (k) {
+      case 'u': menu_input(IN_UP); break;
+      case 'd': menu_input(IN_DOWN); break;
+      case 'l': menu_input(IN_LEFT); break;
+      case 'r': menu_input(IN_RIGHT); break;
+      case 'o': menu_input(IN_OK); break;
+      case 'b': menu_input(IN_BACK); break;
+      case 'a': menu_input(IN_APPLY); break;
+      case '[': menu_input(IN_TAB_PREV); break;
+      case ']': menu_input(IN_TAB_NEXT); break;
+      case 'P': g_last_pad = 1; g_dirty = 1; break;
+      case 'K': g_last_pad = 0; g_dirty = 1; break;
+      default: break;
+      }
+    }
   }
   return 1;
 }
 
-void DcOptions_DrawModal(uint8_t *dst, size_t pitch, int w, int h) {
+int DcOptions_DrawModalLayer(const SnesModalLayerView *v, SnesModalLayer *out) {
   g_modal_presents++;
-  if (g_ui && recomp_runtime_ui_is_open(g_ui))
-    recomp_runtime_ui_render_argb8888(g_ui, dst, w, h, (int)pitch);
+  if (!g_open) return 0;
+  static const uint32_t *last_frame_seen;
+  static double last_open;
+  if (g_opened_at != last_open || v->frame != last_frame_seen) {
+    /* The frame is frozen while open: blur it once per opening. */
+    make_blur(v);
+    last_open = g_opened_at;
+    last_frame_seen = v->frame;
+    g_dirty = 1;
+  }
+  if (v->out_w != g_last_out_w || v->out_h != g_last_out_h) {
+    g_last_out_w = v->out_w;
+    g_last_out_h = v->out_h;
+    g_dirty = 1;
+  }
+  /* Status and confirm prompts expire; re-render a few times a second. */
+  static double last_tick;
+  double t = now_s();
+  if (t - last_tick > 0.25) { last_tick = t; g_dirty = 1; }
+  if (g_dirty || g_animating || !g_layer) {
+    g_dirty = 0;
+    render_panel(v);
+  }
+  if (!g_layer) return 0;
+  out->argb = g_layer;
+  out->x = g_lx; out->y = g_ly; out->w = g_lw; out->h = g_lh;
+  return 1;
+}
+
+/* The old 2x black/white path, unused while draw_modal_layer is wired. */
+void DcOptions_DrawModal(uint8_t *dst, size_t pitch, int w, int h) {
+  (void)dst; (void)pitch; (void)w; (void)h;
+  g_modal_presents++;
 }
